@@ -1,46 +1,63 @@
 FROM node:22-bookworm
 
+ARG OPENCLAW_INSTALL_BROWSER
+
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    git \
-    gosu \
-    procps \
-    python3 \
-    build-essential \
-    zip \
-  && rm -rf /var/lib/apt/lists/*
+      ca-certificates \
+          curl \
+              git \
+                  gosu \
+                      procps \
+                          python3 \
+                              build-essential \
+                                  zip \
+                                      xvfb \
+                                        && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g openclaw@2026.3.13 clawhub@latest
+                                        RUN npm install -g openclaw@2026.3.13 clawhub@latest
 
-WORKDIR /app
+                                        WORKDIR /app
 
-COPY package.json pnpm-lock.yaml ./
-RUN corepack enable && pnpm install --frozen-lockfile --prod
+                                        COPY package.json pnpm-lock.yaml ./
+                                        RUN corepack enable && pnpm install --frozen-lockfile --prod
 
-COPY src ./src
-COPY --chmod=755 entrypoint.sh ./entrypoint.sh
+                                        COPY src ./src
+                                        COPY --chmod=755 entrypoint.sh ./entrypoint.sh
 
-RUN useradd -m -s /bin/bash openclaw \
-  && chown -R openclaw:openclaw /app \
-  && mkdir -p /data && chown openclaw:openclaw /data \
-  && mkdir -p /home/linuxbrew/.linuxbrew && chown -R openclaw:openclaw /home/linuxbrew
+                                        # Install Playwright Chromium with system dependencies if OPENCLAW_INSTALL_BROWSER=1
+                                        RUN if [ "$OPENCLAW_INSTALL_BROWSER" = "1" ]; then \
+                                              mkdir -p /home/node/.cache/ms-playwright && \
+                                                    PLAYWRIGHT_BROWSERS_PATH=/home/node/.cache/ms-playwright \
+                                                            node /usr/local/lib/node_modules/openclaw/node_modules/playwright-core/cli.js install --with-deps chromium && \
+                                                                  chmod -R 777 /home/node/.cache/ms-playwright; \
+                                                                      fi
 
-USER openclaw
-RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-ENV PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"
-ENV HOMEBREW_PREFIX="/home/linuxbrew/.linuxbrew"
-ENV HOMEBREW_CELLAR="/home/linuxbrew/.linuxbrew/Cellar"
-ENV HOMEBREW_REPOSITORY="/home/linuxbrew/.linuxbrew/Homebrew"
-
-ENV PORT=8080
-ENV OPENCLAW_ENTRY=/usr/local/lib/node_modules/openclaw/dist/entry.js
-EXPOSE 8080
-
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-  CMD curl -f http://localhost:8080/setup/healthz || exit 1
-
-USER root
-ENTRYPOINT ["./entrypoint.sh"]
+                                                                      RUN useradd -m -s /bin/bash openclaw \
+                                                                        && chown -R openclaw:openclaw /app \
+                                                                          && mkdir -p /data && chown openclaw:openclaw /data \
+                                                                            && mkdir -p /home/linuxbrew/.linuxbrew && chown -R openclaw:openclaw /home/linuxbrew \
+                                                                              && if [ -d /home/node/.cache/ms-playwright ]; then \
+                                                                                     mkdir -p /home/openclaw/.cache && \
+                                                                                            cp -a /home/node/.cache/ms-playwright /home/openclaw/.cache/ms-playwright && \
+                                                                                                   chown -R openclaw:openclaw /home/openclaw/.cache; \
+                                                                                                        fi
+                                                                                                        
+                                                                                                        USER openclaw
+                                                                                                        RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+                                                                                                        
+                                                                                                        ENV PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"
+                                                                                                        ENV HOMEBREW_PREFIX="/home/linuxbrew/.linuxbrew"
+                                                                                                        ENV HOMEBREW_CELLAR="/home/linuxbrew/.linuxbrew/Cellar"
+                                                                                                        ENV HOMEBREW_REPOSITORY="/home/linuxbrew/.linuxbrew/Homebrew"
+                                                                                                        ENV PLAYWRIGHT_BROWSERS_PATH="/home/openclaw/.cache/ms-playwright"
+                                                                                                        
+                                                                                                        ENV PORT=8080
+                                                                                                        ENV OPENCLAW_ENTRY=/usr/local/lib/node_modules/openclaw/dist/entry.js
+                                                                                                        EXPOSE 8080
+                                                                                                        
+                                                                                                        HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
+                                                                                                          CMD curl -f http://localhost:8080/setup/healthz || exit 1
+                                                                                                          
+                                                                                                          USER root
+                                                                                                          ENTRYPOINT ["./entrypoint.sh"]
