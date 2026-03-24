@@ -6,7 +6,7 @@ Automatically file insurance reimbursement claims on the GeoBlue/BCBS member por
 ## Trigger
 Say "file claim", "file my claims", "submit reimbursement", "BCBS claim", or similar.
 
-## ⚠️ CRITICAL: Flutter Web Automation Strateg
+## ⚠️ CRITICAL: Flutter Web Automation Strate
 
 The BCBS portal is built with **Flutter Web using the HTML renderer** (NOT CanvasKit canvas). This means:
 - The page is composed of `<flt-semantics>` custom elements with ARIA roles (`role="button"`, `role="textbox"`, etc.)
@@ -320,7 +320,7 @@ Claim Reference: [ref number]
 - Chat ID: `8409634074`
 
 ## Notes
-- Use browser profile `browserbase` (cloud browser via Browserbase), NOT local Chromium (`openclaw`)
+- Use browser profile `openclaw` (local Chromium), NOT `browserbase`
 - The portal does NOT use CanvasKit canvas rendering — it uses Flutter HTML renderer with semantic DOM elements
 - All `flt-semantics` elements are real DOM nodes that can be queried and interacted with via the accessibility tree
 - Take screenshots at EVERY step for debugging
