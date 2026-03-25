@@ -6,7 +6,7 @@ Automatically file insurance reimbursement claims on the GeoBlue/BCBS member por
 ## Trigger
 Say "file claim", "file my claims", "submit reimbursement", "BCBS claim", or similar.
 
-## ⚠️ CRITICAL: Flutter Web Automation Strate
+## ⚠️ CRITICAL: Flutter Web Automation Strategy
 
 The BCBS portal is built with **Flutter Web using the HTML renderer** (NOT CanvasKit canvas). This means:
 - The page is composed of `<flt-semantics>` custom elements with ARIA roles (`role="button"`, `role="textbox"`, etc.)
@@ -35,11 +35,37 @@ The BCBS portal is built with **Flutter Web using the HTML renderer** (NOT Canva
 - Step 3 (alt): For dropdowns: After clicking, wait 1s, then look for overlay options as new `button` elements and click the matching one
 - Step 4: **Press Tab** to move to the next field (triggers Flutter's onSubmitted/unfocus)
 
-**Date fields:**
-- Date pickers appear as `button "Start Date of Service date picker. Current value: not set"`
-- Click the button, wait for the date input to appear
-- Type the date in **MM/DD/YYYY** format
-- Press Tab to confirm
+**Date fields (Flutter Material DatePicker — CRITICAL):**
+
+⚠️ **DO NOT** try to type dates into the searchbox/text input — `startDate.value = '...'` and even `document.execCommand('insertText')` do NOT trigger Flutter's internal `setState()` on the picker widget, so clicking OK saves nothing.
+
+**USE THE CALENDAR UI DIRECTLY — this is the ONLY reliable method:**
+
+1. **Click** the date picker button (e.g., `button "Start Date of Service date picker. Current value: not set"`)
+2. **Wait 2 seconds** for the calendar dialog to fully render
+3. **Navigate to the correct month/year:**
+   - The calendar dialog shows a month/year header (e.g., "March 2026") — use `find` to locate it
+   - Click the **left chevron/arrow** button to go back one month, or **right chevron/arrow** to go forward
+   - Repeat until you reach the target month (e.g., for January 2026 when viewing March 2026, click left arrow twice)
+   - Alternative: Click the month/year header text to open a year/month selector, then pick the year, then pick the month
+   - After each navigation click, **wait 1 second** for the calendar to re-render
+4. **Click the target day** — each day appears as a `button` in the accessibility tree (e.g., `button "9"` for the 9th)
+   - Use `find("9")` or `read_page` to locate the day button
+   - **Be careful with ambiguous numbers** — the calendar may show trailing days from the previous/next month. Use the accessibility tree to confirm the correct button.
+5. **Click OK** — look for `button "OK"` in the dialog
+6. **Wait 1 second**, then screenshot to verify the date was saved
+7. The date picker button should now show the selected date (e.g., "Current value: 01/09/2026")
+
+**If the calendar is hard to navigate (many months away):**
+- Try the "switch to input" approach as a FALLBACK ONLY:
+  1. Look for a pencil/edit icon button in the date picker dialog header (switches to text input mode)
+  2. Click it, wait 1 second
+  3. Click the text input field that appears
+  4. Wait 500ms for Flutter to create the editing input in `<flt-text-editing-host>`
+  5. Use keyboard: `Ctrl+A` (select all), then `type` the date in MM/DD/YYYY format character by character
+  6. Press Tab or click elsewhere to trigger onChanged
+  7. Click OK
+  - If this still doesn't work, go back to the calendar click approach
 
 **Radio buttons:**
 - Appear as `radio` elements in the accessibility tree
@@ -203,8 +229,8 @@ Fields (in order from top to bottom):
 **Section: VISIT DETAILS** (scroll down more to see)
 - `textbox "Condition or Diagnosis dropdown"` — **Click to open**, search for the diagnosis code from Sheet column G. If not found in dropdown, select "OTHER" and type a description.
 - `textbox "Service Description dropdown"` — **Click to open**, select the service from Sheet column H. If not found, select "OTHER" and describe.
-- `button "Start Date of Service date picker..."` — **Click**, then type the date from Sheet column D in **MM/DD/YYYY** format. Press Tab.
-- `button "End Date of Service date picker..."` — **Click**, then type the SAME date (for single-day visits). Press Tab.
+- `button "Start Date of Service date picker..."` — **Click to open the calendar dialog. DO NOT type a date — use the calendar UI instead.** Navigate to the correct month using the left/right arrow buttons, then click the target day number, then click OK. See the "Date fields" section above for the full procedure. Parse the date from Sheet column D (format may vary — convert to month/day/year).
+- `button "End Date of Service date picker..."` — **Same procedure as Start Date.** Click to open calendar, navigate to the same month, click the same day, click OK. For single-day visits, both dates should match.
 
 After filling ALL fields, screenshot the completed form.
 
@@ -275,6 +301,25 @@ Claim Reference: [ref number]
 - Wait longer (2-3 seconds) after page transitions.
 - Try `read_page` with `filter: interactive` to see all available elements.
 - Try Tab key navigation to cycle through elements.
+
+### Date picker won't save the selected date
+This is a KNOWN Flutter Web issue. The root cause: Flutter's DatePicker dialog manages its own internal state via `setState()`. Programmatic text input (setting `.value`, `execCommand`, `dispatchEvent`) does NOT call `setState()`, so the OK button saves nothing.
+
+**Solution: ALWAYS use the calendar grid clicks.**
+1. Open the picker, wait 2 seconds
+2. Navigate to the target month using arrow buttons (each click = 1 month)
+3. Click the day number button in the calendar grid
+4. Click OK
+5. Verify the date picker button text changed from "not set" to the expected date
+
+**If the day buttons aren't visible in the accessibility tree:**
+- Try `read_page` with `filter: all` (not just interactive) — some days may not have the `button` role
+- Try `find("January 9, 2026")` or `find("9, Friday")` — Flutter may use full date labels
+- As a last resort, use coordinate-based clicks on the visible day number in the calendar grid (take a screenshot first to locate the exact position)
+
+**If you accidentally opened text input mode (pencil icon):**
+- Click the calendar icon to switch back to calendar mode
+- Then use the calendar click approach
 
 ### Dropdown won't open
 - Click the `textbox "... dropdown"` element, wait 2 seconds, take screenshot.
