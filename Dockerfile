@@ -10,10 +10,14 @@ RUN apt-get update \
  gosu \
  procps \
  python3 \
+ python3-pip \
  build-essential \
  zip \
  xvfb \
  && rm -rf /var/lib/apt/lists/*
+
+ # Install Python Playwright for claim_filer.py
+ RUN pip install --break-system-packages playwright
 
  RUN npm install -g openclaw@2026.3.13 clawhub@latest
 
