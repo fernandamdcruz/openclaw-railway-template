@@ -6,6 +6,21 @@ Automatically file insurance reimbursement claims on the GeoBlue/BCBS member por
 ## Trigger
 Say "file claim", "file my claims", "submit reimbursement", "BCBS claim", or similar.
 
+## ⚠️ Token Efficiency Rules (MANDATORY)
+
+Each API call resends the full conversation context. Browser automation tasks make 50-100+ calls, so context size directly drives cost. Follow these rules to keep claims under $7:
+
+1. **Use `find()` instead of `read_page`** — `find("Next button")` returns just what you need. `read_page` dumps the entire accessibility tree (~3K tokens). Only use `read_page` when you genuinely don't know what's on the page.
+2. **Minimize screenshots** — Only take screenshots at these moments:
+   - After login (verify success)
+   - After each wizard step transition (verify correct page)
+   - When something goes wrong (debug)
+   - Before submitting the final claim (verify data)
+   - Do NOT screenshot after every click, field fill, or scroll.
+3. **Be concise** — Don't explain what you're doing. Just do it. No "I'll now click the Next button" — just click it.
+4. **Batch field fills** — Fill all fields on a page, THEN screenshot once to verify. Don't screenshot between individual fields.
+5. **Don't repeat tool calls** — If `find("Start Date")` found the element, click it immediately. Don't call `find` again or `read_page` to "confirm."
+
 ## ⚠️ CRITICAL: Flutter Web Automation Strategy
 
 The BCBS portal is built with **Flutter Web using the HTML renderer** (NOT CanvasKit canvas). This means:
@@ -96,7 +111,7 @@ The BCBS portal is built with **Flutter Web using the HTML renderer** (NOT Canva
 
 **General rules:**
 - After EVERY interaction, wait at least 1 second before the next action
-- Take screenshots frequently — after each step, before and after filling fields
+- Take screenshots SPARINGLY — only at wizard step transitions and errors (see Token Efficiency Rules above)
 - If an element isn't found, try scrolling down first (Flutter lazy-renders content)
 - Flutter keyboard navigation works: Tab, Shift+Tab, Enter, Space, Arrow keys
 
@@ -368,6 +383,6 @@ This is a KNOWN Flutter Web issue. The root cause: Flutter's DatePicker dialog m
 - Use browser profile `openclaw` (local Chromium), NOT `browserbase`
 - The portal does NOT use CanvasKit canvas rendering — it uses Flutter HTML renderer with semantic DOM elements
 - All `flt-semantics` elements are real DOM nodes that can be queried and interacted with via the accessibility tree
-- Take screenshots at EVERY step for debugging
+- Take screenshots SPARINGLY per Token Efficiency Rules above
 - If the form flow changes, the accessibility tree will still expose element roles and labels — adapt accordingly
 - The 6-step wizard is: Preliminary Questions → Basic Information → Other Insurance → Charges → Reimbursement Details → Authorization
