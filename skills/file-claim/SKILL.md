@@ -1,12 +1,38 @@
 # File BCBS Claim — Skill Definition
 
 ## Description
-Automatically file insurance reimbursement claims on the GeoBlue/BCBS member portal (https://members.bcbsglobalsolutions.com). Uses accessibility-based selectors for Flutter Web.
+Automatically file insurance reimbursement claims on the GeoBlue/BCBS member portal (https://members.bcbsglobalsolutions.com). Uses a hybrid approach: a Playwright Python script handles 90% of the workflow deterministically, and the LLM only intervenes for error recovery.
 
 ## Trigger
 Say "file claim", "file my claims", "submit reimbursement", "BCBS claim", or similar.
 
-## ⚠️ Token Efficiency Rules (MANDATORY)
+## ⚠️ PRIMARY METHOD: Run the Playwright Script
+
+**ALWAYS try the Playwright script first.** It files claims without using any LLM API calls, making it ~10x cheaper and ~4x faster than LLM-driven browser automation.
+
+### How to run:
+```bash
+python3 /data/workspace/skills/file-claim/claim_filer.py
+```
+
+### What the script does automatically:
+1. Reads pending claims from Google Sheets (column K = "Pending")
+2. Logs into the BCBS portal (handles 2FA by reading the code from Gmail)
+3. Navigates the 6-step claim wizard for each pending claim
+4. Uploads supporting documents from Google Drive
+5. Updates the Google Sheet with the claim reference number
+6. Sends a Telegram notification to Fernanda
+
+### When to fall back to LLM-driven browser automation:
+Only use the manual browser automation approach (described below) if:
+- The script exits with an error (check the output for `[ERROR]` lines)
+- The script reports it got stuck on a specific step
+- The portal UI has changed and selectors no longer match
+- You need to handle a special case the script doesn't cover
+
+If falling back, read the script's error output to understand WHERE it failed, then use the Flutter Web patterns below to complete just the remaining steps manually. Do NOT restart from the beginning.
+
+## ⚠️ Token Efficiency Rules (MANDATORY — for LLM fallback only)
 
 Each API call resends the full conversation context. Browser automation tasks make 50-100+ calls, so context size directly drives cost. Follow these rules to keep claims under $7:
 
@@ -23,7 +49,7 @@ Each API call resends the full conversation context. Browser automation tasks ma
 
 ## ⚠️ CRITICAL: Flutter Web Automation Strategy
 
-The BCBS portal is built with **Flutter Web using the HTML renderer** (NOT CanvasKit canvas). This means:
+The BCBS portal is built with **Flutter Web using CanvasKit rendering**. This means:
 - The page is composed of `<flt-semantics>` custom elements with ARIA roles (`role="button"`, `role="textbox"`, etc.)
 - **DO NOT use coordinate-based clicks** — they break when the layout shifts
 - **DO NOT use CSS selectors for standard HTML elements** — Flutter doesn't use `<input>`, `<button>`, etc. in the normal sense
@@ -60,7 +86,7 @@ The BCBS portal is built with **Flutter Web using the HTML renderer** (NOT Canva
 2. **Wait 2 seconds** for the calendar dialog to fully render
 3. **Navigate to the correct month/year:**
    - The calendar dialog shows a month/year header (e.g., "March 2026") — use `find` to locate it
-   - Click the **left chevron/arrow** button to go back one month, or **right chevron/arrow** to go forward
+   - Click `button "Backward"` to go back one month, or `button "Forward"` to go forward
    - Repeat until you reach the target month (e.g., for January 2026 when viewing March 2026, click left arrow twice)
    - Alternative: Click the month/year header text to open a year/month selector, then pick the year, then pick the month
    - After each navigation click, **wait 1 second** for the calendar to re-render
@@ -70,6 +96,18 @@ The BCBS portal is built with **Flutter Web using the HTML renderer** (NOT Canva
 5. **Click OK** — look for `button "OK"` in the dialog
 6. **Wait 1 second**, then screenshot to verify the date was saved
 7. The date picker button should now show the selected date (e.g., "Current value: 01/09/2026")
+
+**PREFERRED: Use the mm/dd/yyyy text input (confirmed working 2026-03-25):**
+The date picker dialog has a `textbox "mm/dd/yyyy"` with `type="search"` at the top. This is a REAL HTML input that triggers Flutter's state:
+1. Click the date picker button to open the dialog
+2. Wait 2 seconds
+3. Click the `textbox "mm/dd/yyyy"` field
+4. Wait 500ms
+5. Type the date in MM/DD/YYYY format (e.g., "01/15/2026")
+6. Click OK (may be unlabeled in accessibility tree — try `get_by_text("OK")`)
+7. Wait 1 second to verify
+
+**If the text input doesn't work, use calendar grid navigation (original approach).**
 
 **If the calendar is hard to navigate (many months away):**
 - Try the "switch to input" approach as a FALLBACK ONLY:
@@ -157,11 +195,11 @@ If any required field (B, C, D, E, F, L) is blank, **stop and ask Fernanda** bef
 ### Step 1.5: Handle 2FA (if triggered)
 
 If the portal shows a verification code screen:
-1. Run the 2FA reader: `python3 /data/workspace/read_2fa.py`
-2. This script uses `gog mail list` to search Gmail for the latest BCBS verification code
-3. It retries for up to 90 seconds waiting for the email
-4. Enter the code into the verification field
-5. Submit
+1. The `claim_filer.py` script handles this automatically — it searches Gmail for the verification code using `gog mail list` (with IMAP as fallback)
+2. If running manually (LLM fallback mode): use `gog mail list --query "from:bcbs verification code" --max 1` to get the latest code
+3. Look for a 6-digit number in the email body
+4. Enter the code into the `textbox` matching "code|otp|2fa|verif"
+5. Click the submit/verify button
 
 ### Step 2: Navigate to eClaim Form
 
@@ -381,7 +419,7 @@ This is a KNOWN Flutter Web issue. The root cause: Flutter's DatePicker dialog m
 
 ## Notes
 - Use browser profile `openclaw` (local Chromium), NOT `browserbase`
-- The portal does NOT use CanvasKit canvas rendering — it uses Flutter HTML renderer with semantic DOM elements
+- The portal uses Flutter Web with CanvasKit rendering — all interactions go through flt-semantics accessibility elements
 - All `flt-semantics` elements are real DOM nodes that can be queried and interacted with via the accessibility tree
 - Take screenshots SPARINGLY per Token Efficiency Rules above
 - If the form flow changes, the accessibility tree will still expose element roles and labels — adapt accordingly
