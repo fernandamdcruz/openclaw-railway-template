@@ -429,7 +429,7 @@ def get_2fa_code_from_gmail() -> Optional[str]:
     for attempt in range(18):  # 18 attempts × 5s = 90s
         try:
             result = subprocess.run(
-                ["gog", "mail", "list", "--query", "from:noreply@bcbsglobalsolutions.com verification code", "--max", "1", "--json"],
+                ["gog", "gmail", "search", "from:noreply@bcbsglobalsolutions.com verification code", "--max", "1", "--json"],
                 capture_output=True, text=True, timeout=15
             )
             if result.returncode == 0:
@@ -533,7 +533,7 @@ def read_pending_claims() -> List[Dict[str, Any]]:
     claims = []
     try:
         result = subprocess.run(
-            ["gog", "sheets", "export", GOOGLE_SHEET_ID, GOOGLE_SHEET_TAB, "--json"],
+            ["gog", "sheets", "get", GOOGLE_SHEET_ID, f"'{GOOGLE_SHEET_TAB}'!A:M", "--json"],
             capture_output=True, text=True, timeout=30
         )
 
@@ -609,9 +609,20 @@ def update_sheets(row_number: int, reference_number: str) -> None:
     """Update Google Sheet: set column K to "Filed" and column M to reference number."""
     print(f"[SHEETS] Updating row {row_number} with reference {reference_number}")
     try:
+        # Update column K (status) to "Filed"
         subprocess.run(
-            ["gog", "sheets", "update", GOOGLE_SHEET_ID, GOOGLE_SHEET_TAB,
-             f"K{row_number}:Filed", f"M{row_number}:{reference_number}"],
+            ["gog", "sheets", "update", GOOGLE_SHEET_ID,
+             f"'{GOOGLE_SHEET_TAB}'!K{row_number}",
+             "--values-json", json.dumps([["Filed"]]),
+             "--input", "USER_ENTERED"],
+            timeout=30, check=True
+        )
+        # Update column M (reference number)
+        subprocess.run(
+            ["gog", "sheets", "update", GOOGLE_SHEET_ID,
+             f"'{GOOGLE_SHEET_TAB}'!M{row_number}",
+             "--values-json", json.dumps([[reference_number]]),
+             "--input", "USER_ENTERED"],
             timeout=30, check=True
         )
         print(f"[SHEETS] Successfully updated row {row_number}")
@@ -1212,7 +1223,7 @@ async def upload_document(page: Page, drive_link: str) -> None:
         # Download using gog CLI (authenticated)
         print(f"[UPLOAD] Downloading file: {file_id}")
         result = subprocess.run(
-            ["gog", "drive", "download", file_id, "--output", temp_file],
+            ["gog", "drive", "download", file_id, "--out", temp_file],
             timeout=60, capture_output=True, text=True
         )
 
