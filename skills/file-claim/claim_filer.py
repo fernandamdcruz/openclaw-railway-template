@@ -433,32 +433,74 @@ def get_2fa_code_from_gmail() -> Optional[str]:
     print("[2FA] Retrieving verification code from Gmail")
 
     # Method 1: Try gog CLI first (available on Railway)
+    import time
     for attempt in range(18):  # 18 attempts × 5s = 90s
         try:
             result = subprocess.run(
                 ["gog", "gmail", "search", "from:noreply@bcbsglobalsolutions.com verification code", "--max", "1", "--json"],
                 capture_output=True, text=True, timeout=15, env=GOG_ENV
             )
-            if result.returncode == 0:
-                emails = json.loads(result.stdout)
-                if emails:
-                    body = emails[0].get("body", "") or emails[0].get("snippet", "")
-                    # Look for 6-digit code
+            if attempt == 0:
+                # Log raw output on first attempt for debugging
+                print(f"[2FA] gog exit code: {result.returncode}")
+                print(f"[2FA] gog stdout (first 500 chars): {result.stdout[:500]}")
+                if result.stderr:
+                    print(f"[2FA] gog stderr: {result.stderr[:300]}")
+
+            if result.returncode == 0 and result.stdout.strip():
+                data = json.loads(result.stdout)
+
+                # Handle various gog output formats:
+                # Could be: [...], {"messages": [...]}, {"threads": [...]}, {"results": [...]}
+                if isinstance(data, list):
+                    emails = data
+                elif isinstance(data, dict):
+                    emails = (data.get("messages") or data.get("threads")
+                              or data.get("results") or data.get("emails") or [])
+                    # If none of the known keys matched, search all values for a list
+                    if not emails:
+                        for v in data.values():
+                            if isinstance(v, list) and len(v) > 0:
+                                emails = v
+                                break
+                else:
+                    emails = []
+
+                for email_item in emails:
+                    # Try various field names for the email body
+                    body = ""
+                    if isinstance(email_item, dict):
+                        body = (email_item.get("body", "")
+                                or email_item.get("snippet", "")
+                                or email_item.get("text", "")
+                                or email_item.get("content", "")
+                                or str(email_item))
+                    elif isinstance(email_item, str):
+                        body = email_item
+
                     code_match = re.search(r'\b(\d{6})\b', body)
                     if code_match:
                         code = code_match.group(1)
-                        print(f"[2FA] Found code via gog CLI")
+                        print(f"[2FA] Found code via gog CLI: {'*' * 4}{code[-2:]}")
                         return code
-        except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
+
+                if attempt == 0:
+                    print(f"[2FA] gog returned data but no 6-digit code found in {len(emails)} email(s)")
+
+        except FileNotFoundError:
+            print("[2FA] gog CLI not found, trying IMAP")
+            break
+        except subprocess.TimeoutExpired:
+            print(f"[2FA] gog timed out on attempt {attempt+1}")
+        except json.JSONDecodeError as e:
+            print(f"[2FA] gog JSON parse error: {e}")
             if attempt == 0:
-                print("[2FA] gog CLI not available, trying IMAP")
-                break
+                print(f"[2FA] Raw output: {result.stdout[:300]}")
         except Exception as e:
             print(f"[2FA] gog attempt {attempt+1} failed: {e}")
 
-        if attempt > 0:
+        if attempt < 17:
             print(f"[2FA] Waiting for email... attempt {attempt+1}/18")
-            import time
             time.sleep(5)
 
     # Method 2: IMAP direct connection
