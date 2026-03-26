@@ -2,6 +2,9 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## ⚠️ MANDATORY: Read FERDY_README.md First
+
+**Before doing ANY programming, debugging, or configuration work in this repo, you MUST read `docs/FERDY_README.md`.** It contains critical operational context: current config state, known incidents, deployment procedures, claim filing details, and hard-won lessons. Skipping it will lead to repeated mistakes.
 
 ## Overview
 
