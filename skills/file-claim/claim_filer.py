@@ -435,80 +435,85 @@ def get_2fa_code_from_gmail() -> Optional[str]:
     import time
     for attempt in range(18):  # 18 attempts × 5s = 90s
         try:
+            # STEP 1: Search for the 2FA email (returns metadata only)
             result = subprocess.run(
                 ["gog", "gmail", "search", "from:noreply@bcbsglobalsolutions.com verification code", "--max", "1", "--json"],
                 capture_output=True, text=True, timeout=15, env=GOG_ENV
             )
             if attempt == 0:
-                # Log raw output on first attempt for debugging
-                print(f"[2FA] gog exit code: {result.returncode}")
-                print(f"[2FA] gog stdout (first 500 chars): {result.stdout[:500]}")
-                if result.stderr:
-                    print(f"[2FA] gog stderr: {result.stderr[:300]}")
+                print(f"[2FA] search exit code: {result.returncode}")
+                print(f"[2FA] search stdout (first 500 chars): {result.stdout[:500]}")
 
-            if result.returncode == 0 and result.stdout.strip():
-                data = json.loads(result.stdout)
+            if result.returncode != 0 or not result.stdout.strip():
+                if attempt < 17:
+                    print(f"[2FA] No results yet, attempt {attempt+1}/18")
+                    time.sleep(5)
+                continue
 
-                # Handle various gog output formats:
-                # Could be: [...], {"messages": [...]}, {"threads": [...]}, {"results": [...]}
-                if isinstance(data, list):
-                    emails = data
-                elif isinstance(data, dict):
-                    emails = (data.get("messages") or data.get("threads")
-                              or data.get("results") or data.get("emails") or [])
-                    # If none of the known keys matched, search all values for a list
-                    if not emails:
-                        for v in data.values():
-                            if isinstance(v, list) and len(v) > 0:
-                                emails = v
-                                break
-                else:
-                    emails = []
+            data = json.loads(result.stdout)
 
-                for email_item in emails:
-                    # Try various field names for the email body
-                    body = ""
-                    if isinstance(email_item, dict):
-                        # Check all string values, not just known keys
-                        for field in ("body", "snippet", "text", "content",
-                                      "plainBody", "textBody", "htmlBody",
-                                      "plain", "raw", "payload"):
-                            val = email_item.get(field, "")
-                            if val and isinstance(val, str):
-                                body = val
-                                break
-                        if not body:
-                            # Stringify the whole dict as last resort
-                            body = str(email_item)
-                    elif isinstance(email_item, str):
-                        body = email_item
+            # Extract email/thread items from whatever wrapper gog uses
+            if isinstance(data, list):
+                emails = data
+            elif isinstance(data, dict):
+                emails = (data.get("messages") or data.get("threads")
+                          or data.get("results") or data.get("emails") or [])
+                if not emails:
+                    for v in data.values():
+                        if isinstance(v, list) and len(v) > 0:
+                            emails = v
+                            break
+            else:
+                emails = []
 
-                    # Try targeted pattern first: "verification code NNNNNN"
-                    code_match = re.search(
-                        r'[Vv]erification\s+code\s*:?\s*(\d{6})', body)
-                    if not code_match:
-                        # Generic 6-digit code
-                        code_match = re.search(r'\b(\d{6})\b', body)
-                    if code_match:
-                        code = code_match.group(1)
-                        print(f"[2FA] Found code via gog CLI: {'*' * 4}{code[-2:]}")
-                        return code
+            if not emails:
+                if attempt < 17:
+                    print(f"[2FA] Empty results, attempt {attempt+1}/18")
+                    time.sleep(5)
+                continue
 
-                # Last resort: regex the entire raw stdout for the code
-                raw_match = re.search(
-                    r'[Vv]erification\s+code\s*:?\s*(\d{6})', result.stdout)
-                if not raw_match:
-                    raw_match = re.search(r'\b(\d{6})\b', result.stdout)
-                if raw_match:
-                    code = raw_match.group(1)
-                    print(f"[2FA] Found code in raw gog output: {'*' * 4}{code[-2:]}")
-                    return code
+            # STEP 2: Get the thread/message ID from search results
+            first = emails[0]
+            thread_id = None
+            if isinstance(first, dict):
+                thread_id = (first.get("threadId") or first.get("thread_id")
+                             or first.get("id") or first.get("messageId")
+                             or first.get("message_id"))
+            elif isinstance(first, str):
+                thread_id = first
 
-                if attempt == 0:
-                    print(f"[2FA] gog returned data but no 6-digit code found in {len(emails)} email(s)")
-                    # Log all keys from first email for debugging
-                    if emails and isinstance(emails[0], dict):
-                        print(f"[2FA] Email keys: {list(emails[0].keys())}")
+            if attempt == 0:
+                print(f"[2FA] First result keys: {list(first.keys()) if isinstance(first, dict) else type(first)}")
+                print(f"[2FA] Extracted thread_id: {thread_id}")
+
+            if not thread_id:
+                print(f"[2FA] Could not extract thread/message ID from search result")
+                if attempt < 17:
+                    time.sleep(5)
+                continue
+
+            # STEP 3: Fetch the full email body via gog gmail get
+            get_result = subprocess.run(
+                ["gog", "gmail", "get", thread_id, "--json"],
+                capture_output=True, text=True, timeout=15, env=GOG_ENV
+            )
+            if attempt == 0:
+                print(f"[2FA] get exit code: {get_result.returncode}")
+                print(f"[2FA] get stdout (first 500 chars): {get_result.stdout[:500]}")
+
+            # Search the full get output for the 6-digit code
+            full_output = get_result.stdout
+            code_match = re.search(
+                r'[Vv]erification\s+code\s*:?\s*(\d{6})', full_output)
+            if not code_match:
+                code_match = re.search(r'\b(\d{6})\b', full_output)
+            if code_match:
+                code = code_match.group(1)
+                print(f"[2FA] Found code via gog CLI: {'*' * 4}{code[-2:]}")
+                return code
+
+            if attempt == 0:
+                print(f"[2FA] gog get returned data but no 6-digit code found")
 
         except FileNotFoundError:
             print("[2FA] gog CLI not found, trying IMAP")
