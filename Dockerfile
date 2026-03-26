@@ -63,7 +63,7 @@ RUN apt-get update \
  ENV OPENCLAW_ENTRY=/usr/local/lib/node_modules/openclaw/dist/entry.js
  EXPOSE 8080
 
- HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=10 \
+ HEALTHCHECK --interval=5s --timeout=10s --start-period=120s --retries=10 \
  CMD curl -f http://localhost:8080/setup/healthz || exit 1
 
  # COPY skills LAST so changes to skill files don't invalidate the expensive
