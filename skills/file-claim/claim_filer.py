@@ -545,7 +545,9 @@ def read_pending_claims() -> List[Dict[str, Any]]:
         )
 
         if result.returncode == 0:
-            rows = json.loads(result.stdout)
+            data = json.loads(result.stdout)
+            # gog sheets get --json wraps rows in {"values": [[...], ...]}
+            rows = data.get("values", data) if isinstance(data, dict) else data
 
             for row_idx, row in enumerate(rows, start=2):  # Row 1 is header
                 # Column K is index 10 (0-indexed)
@@ -687,21 +689,40 @@ async def login(page: Page) -> None:
         raise ValueError("BCBS_USERNAME or BCBS_PASSWORD environment variables not set")
 
     try:
+        # STEP 1: Load the Flutter landing page
         print(f"[AUTH] Navigating to {BCBS_PORTAL_URL}")
         await page.goto(BCBS_PORTAL_URL, wait_until="networkidle")
-        await asyncio.sleep(3)
+        await asyncio.sleep(5)
+        await take_screenshot(page, "landing_page")
 
-        # Fill username
-        await fill_flutter_field(page, "username|email|user", username)
-
-        # Fill password
-        await fill_flutter_field(page, "password", password)
-
-        # Click Login button
-        print("[AUTH] Clicking Login button")
-        login_btn = page.get_by_role("button", name=re.compile("login|sign in", re.IGNORECASE))
+        # STEP 2: Click the Flutter "Login" button on the landing page
+        # This is a <flt-semantics role="button">Login</flt-semantics> element
+        print("[AUTH] Clicking Login button on landing page")
+        login_btn = page.get_by_role("button", name=re.compile("^login$", re.IGNORECASE))
         await login_btn.click()
-        await asyncio.sleep(4)  # Wait for dashboard or 2FA
+        await asyncio.sleep(5)  # Wait for redirect to SSO login form
+        await take_screenshot(page, "sso_login_form")
+        print(f"[AUTH] Redirected to: {page.url}")
+
+        # STEP 3: Fill the standard HTML login form (not Flutter)
+        # Username: <input name="identifier" autocomplete="username">
+        username_input = page.locator('input[name="identifier"]')
+        await username_input.wait_for(state="visible", timeout=15000)
+        await username_input.fill(username)
+        print("[AUTH] Username entered")
+
+        # Password: <input name="credentials.passcode" type="password">
+        password_input = page.locator('input[name="credentials.passcode"]')
+        await password_input.wait_for(state="visible", timeout=5000)
+        await password_input.fill(password)
+        print("[AUTH] Password entered")
+
+        # Submit: <input type="submit" value="SIGN IN">
+        print("[AUTH] Clicking SIGN IN")
+        submit_btn = page.locator('input[type="submit"][value="SIGN IN"]')
+        await submit_btn.click()
+        await asyncio.sleep(5)  # Wait for redirect back to portal
+        await take_screenshot(page, "after_sign_in")
 
         # Check if 2FA is required
         await handle_2fa(page)
