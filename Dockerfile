@@ -50,8 +50,8 @@ RUN apt-get update \
  USER openclaw
  RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
- # Install gog CLI for Gmail access (used by read_2fa.py for BCBS 2FA codes)
- RUN /home/linuxbrew/.linuxbrew/bin/brew install gog
+ # Install gog CLI for Gmail/Sheets/Drive access (formula name is gogcli)
+ RUN /home/linuxbrew/.linuxbrew/bin/brew install gogcli
 
  ENV PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"
  ENV HOMEBREW_PREFIX="/home/linuxbrew/.linuxbrew"
@@ -63,7 +63,7 @@ RUN apt-get update \
  ENV OPENCLAW_ENTRY=/usr/local/lib/node_modules/openclaw/dist/entry.js
  EXPOSE 8080
 
- HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
+ HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=10 \
  CMD curl -f http://localhost:8080/setup/healthz || exit 1
 
  USER root

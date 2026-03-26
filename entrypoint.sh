@@ -1,8 +1,8 @@
 #!/bin/bash
-set -e
+# NOTE: no set -e — we want the server to start even if setup steps fail
 
-chown -R openclaw:openclaw /data
-chmod 700 /data
+chown -R openclaw:openclaw /data || echo "[entrypoint] WARNING: chown /data failed"
+chmod 700 /data || true
 
 if [ ! -d /data/.linuxbrew ]; then
  cp -a /home/linuxbrew/.linuxbrew /data/.linuxbrew
@@ -12,9 +12,10 @@ if [ ! -d /data/.linuxbrew ]; then
  ln -sfn /data/.linuxbrew /home/linuxbrew/.linuxbrew
 
  # Self-healing: ensure gog is installed (survives volume wipes)
+ # IMPORTANT: Run in background with timeout so it never blocks healthcheck
  if ! command -v gog >/dev/null 2>&1; then
- echo "[entrypoint] gog not found, installing..."
- gosu openclaw brew install gog 2>&1 || echo "[entrypoint] WARNING: gog install failed"
+ echo "[entrypoint] gog not found, installing in background..."
+ (timeout 120 gosu openclaw brew install gogcli 2>&1 && echo "[entrypoint] gogcli installed OK" || echo "[entrypoint] WARNING: gogcli install failed") &
  fi
 
  # Self-healing: ensure browser profile color fields exist (prevents gateway crash-loop)
@@ -76,5 +77,9 @@ if [ ! -d /data/.linuxbrew ]; then
  else
  echo "[entrypoint] No Chromium found, skipping browser start"
  fi
+
+ # Clean stale lock/pid files from previous container (prevents "gateway already running" errors)
+ rm -f /data/.openclaw/*.lock /data/.openclaw/*.pid /tmp/.openclaw*.lock 2>/dev/null || true
+ echo "[entrypoint] Starting server..."
 
  exec gosu openclaw node src/server.js
