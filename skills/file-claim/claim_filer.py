@@ -229,9 +229,11 @@ async def select_dropdown(page: Page, dropdown_pattern: str, value: str) -> None
     try:
         print(f"[DROPDOWN] Trying Strategy 3: JavaScript injection")
         # Find all flt-semantics elements with the value text and click via JS
+        # NOTE: escape value for JS string (can't use backslash in f-string expr on Python <3.12)
+        escaped_value = value.replace("'", "\\'")
         clicked = await page.evaluate(f"""
             () => {{
-                const target = '{value.replace("'", "\\'")}';
+                const target = '{escaped_value}';
                 const els = document.querySelectorAll('flt-semantics');
                 for (const el of els) {{
                     const label = el.getAttribute('aria-label') || el.innerText || '';
