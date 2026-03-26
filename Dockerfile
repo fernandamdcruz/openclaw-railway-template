@@ -27,7 +27,6 @@ RUN apt-get update \
  RUN corepack enable && pnpm install --frozen-lockfile --prod
 
  COPY src ./src
- COPY skills ./skills
  COPY --chmod=755 entrypoint.sh ./entrypoint.sh
 
  # Install Playwright Chromium with system dependencies if OPENCLAW_INSTALL_BROWSER=1
@@ -66,6 +65,10 @@ RUN apt-get update \
 
  HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=10 \
  CMD curl -f http://localhost:8080/setup/healthz || exit 1
+
+ # COPY skills LAST so changes to skill files don't invalidate the expensive
+ # Chromium/Homebrew/gogcli layers above. This keeps rebuilds under 30s.
+ COPY skills ./skills
 
  USER root
  ENTRYPOINT ["./entrypoint.sh"]
