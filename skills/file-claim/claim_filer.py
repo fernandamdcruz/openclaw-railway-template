@@ -954,14 +954,39 @@ async def step2_basic_info(page: Page, claim: Dict[str, Any]) -> None:
 
     for attempt in range(MAX_RETRIES):
         try:
-            # Fill eClaim Nick Name (replace pre-filled value with invoice number)
-            await fill_flutter_field(page, "nick name|claim.*name|CLM|eclaim", claim["invoice_num"])
+            # Fill eClaim Nick Name — actual element:
+            # <input aria-label=": CLM DD-MMM-YYYY" type="text" data-semantics-role="text-field">
+            print("[STEP2] Filling eClaim Nick Name")
+            nickname_field = page.locator('input[aria-label*="CLM"]')
+            await nickname_field.wait_for(state="visible", timeout=15000)
+            await nickname_field.click()
+            await asyncio.sleep(SHORT_WAIT / 1000)
+            await page.keyboard.press("Control+a")
+            await asyncio.sleep(0.1)
+            await page.keyboard.type(claim["invoice_num"], delay=30)
+            await page.keyboard.press("Tab")
+            await wait_for_flutter(page)
 
-            # Select patient from dropdown
-            await select_dropdown(page, "patient", claim["patient"])
+            # Select patient — actual element:
+            # <input type="search" data-semantics-role="text-field"> (no aria-label)
+            print("[STEP2] Selecting patient")
+            patient_field = page.locator('input[type="search"][data-semantics-role="text-field"]')
+            await patient_field.first.wait_for(state="visible", timeout=15000)
+            await patient_field.first.click()
+            await asyncio.sleep(1)
+            await page.keyboard.type(claim["patient"], delay=50)
+            await asyncio.sleep(2)
+            # Click the matching option in the dropdown overlay
+            option = page.get_by_role("button", name=re.compile(re.escape(claim["patient"]), re.IGNORECASE))
+            if await option.count() > 0:
+                await option.first.click()
+            else:
+                await page.keyboard.press("Enter")
+            await wait_for_flutter(page)
 
             # Dismiss any NOTICE popup
             await asyncio.sleep(1)
+            await dismiss_popups(page)
             await close_popup(page)
 
             # Click Next
