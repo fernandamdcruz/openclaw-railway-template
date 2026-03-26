@@ -1759,16 +1759,28 @@ async def main():
                     failures.append((claim["invoice_num"], "Step failed — see logs"))
                     print(f"[MAIN] Skipping sheet update for failed claim {claim['invoice_num']}")
 
+            # Print a clear, unmissable summary for FerdyBot to relay
             print(f"\n{'='*70}")
-            print(f"[MAIN] Complete — Filed {filed_count}/{len(claims)} claims")
-            print(f"[MAIN] Timestamp: {datetime.now().isoformat()}")
+            if filed_count == len(claims) and filed_count > 0:
+                print(f"[RESULT] SUCCESS — All {filed_count} claim(s) filed successfully!")
+            elif filed_count > 0:
+                print(f"[RESULT] PARTIAL — Filed {filed_count}/{len(claims)} claims.")
+                for inv, err in failures:
+                    print(f"  FAILED: {inv} — {err}")
+            else:
+                print(f"[RESULT] FAILED — None of the {len(claims)} claim(s) could be filed.")
+                for inv, err in failures:
+                    print(f"  FAILED: {inv} — {err}")
+            print(f"Timestamp: {datetime.now().isoformat()}")
             print(f"{'='*70}\n")
 
-            # Always send a summary so Fernanda knows the run finished
+            # Also try Telegram direct notification (if bot token is available)
             notify_telegram_summary(len(claims), filed_count, failures)
         except Exception as e:
-            print(f"[ERROR] Fatal error: {str(e)}")
-            # Notify even on fatal crash
+            print(f"\n{'='*70}")
+            print(f"[RESULT] CRASHED — Fatal error: {str(e)[:300]}")
+            print(f"{'='*70}\n")
+            # Also try Telegram direct notification
             notify_telegram_summary(
                 len(claims) if claims else 0, 0,
                 [("ALL", str(e)[:200])]

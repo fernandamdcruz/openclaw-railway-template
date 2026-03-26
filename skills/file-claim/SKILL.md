@@ -11,11 +11,11 @@ Run the Playwright script. It handles everything: login, 2FA, form filling, docu
 python3 /data/workspace/skills/file-claim/claim_filer.py
 ```
 
-Report the script's output to Fernanda. That's it.
+**CRITICAL: As soon as the script finishes (whether it succeeded or failed), IMMEDIATELY message Fernanda with the result.** Do not wait. Do not do anything else first. She is waiting for your reply. Look for the `[RESULT]` line at the end of the script output and send that to her, plus a brief summary of what happened.
 
 ## If The Script Fails
 
-1. Report the error output to Fernanda exactly as printed.
+1. **IMMEDIATELY message Fernanda** with the error output.
 2. **STOP.** Do NOT try to fix the script, edit the code, or fall back to manual browser automation.
 3. Wait for Fernanda's instructions.
 
