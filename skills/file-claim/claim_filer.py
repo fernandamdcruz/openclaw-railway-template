@@ -402,6 +402,70 @@ async def _navigate_calendar(page: Page, date_obj: datetime) -> None:
         print(f"[DATE] Could not click day button: {e}")
 
 
+async def _select_calendar_date(page: Page, date_obj: datetime) -> None:
+    """
+    Select a date from the Flutter calendar picker dialog.
+
+    Calendar DOM structure (confirmed 2026-03-26):
+    - Month header shows "March 2026" as a <span>
+    - Backward/Forward buttons for month navigation
+    - Day cells are <flt-semantics> with text like "Thu, 09 January 2026"
+    - OK and CANCEL buttons at the bottom
+    """
+    target_month_year = date_obj.strftime("%B %Y")  # "January 2026"
+    # Build the day label: "Thu, 09 January 2026"
+    target_day_label = date_obj.strftime("%a, %d %B %Y")  # "Thu, 09 January 2026"
+
+    # Navigate to the correct month
+    for _ in range(24):
+        # Check if we're on the right month
+        month_header = page.locator(f"text={target_month_year}")
+        if await month_header.count() > 0:
+            print(f"[DATE] On correct month: {target_month_year}")
+            break
+        # Navigate backward (claims are for past dates)
+        back_btn = page.get_by_role("button", name="Backward")
+        if await back_btn.count() > 0:
+            await back_btn.first.click()
+            await asyncio.sleep(0.5)
+        else:
+            break
+
+    # Click the target day cell by matching its text content
+    day_cell = page.locator(f"flt-semantics:has(span):text-is('{target_day_label}')")
+    if await day_cell.count() == 0:
+        # Try partial match — just the day number in the month
+        # Cells contain text like "Thu, 09 January 2026"
+        day_num = str(date_obj.day).zfill(2)
+        month_name = date_obj.strftime("%B")
+        year = date_obj.strftime("%Y")
+        day_cell = page.locator(f"flt-semantics span:text-matches('{day_num} {month_name} {year}')")
+        if await day_cell.count() > 0:
+            await day_cell.first.click()
+        else:
+            print(f"[DATE] Could not find day cell for {target_day_label}, trying text match")
+            # Last resort: find by visible text containing the day number
+            all_cells = page.locator("flt-semantics span")
+            count = await all_cells.count()
+            for i in range(count):
+                cell_text = await all_cells.nth(i).inner_text()
+                if f"{day_num} {month_name}" in cell_text:
+                    await all_cells.nth(i).click()
+                    break
+    else:
+        await day_cell.first.click()
+
+    await asyncio.sleep(0.5)
+    print(f"[DATE] Clicked day: {target_day_label}")
+
+    # Click OK to confirm
+    ok_btn = page.get_by_role("button", name="OK")
+    if await ok_btn.count() > 0:
+        await ok_btn.first.click()
+        await wait_for_flutter(page)
+        print("[DATE] Confirmed date selection")
+
+
 async def close_popup(page: Page) -> None:
     """Close any popup/dialog that may appear (Important Update, NOTICE, etc.)."""
     try:
@@ -1057,92 +1121,178 @@ async def step4_charges(page: Page, claim: Dict[str, Any]) -> None:
     """
     print("[STEP4] Invoiced Charges")
 
+    # Parse the service date once — used for both start/end
+    date_str = claim["date"]
+    try:
+        date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        try:
+            date_obj = datetime.strptime(date_str, "%m/%d/%Y")
+        except ValueError:
+            try:
+                date_obj = datetime.strptime(date_str, "%d/%m/%Y")
+            except ValueError:
+                date_obj = datetime.strptime(date_str, "%B %d, %Y")
+
     for attempt in range(MAX_RETRIES):
         try:
             await scroll_form_to_top(page)
             await asyncio.sleep(0.5)
 
-            # 1. Fill Charge Nickname (replace pre-filled "CHG 1 DD-MMM-YYYY")
+            # 1. Charge Nickname — <input aria-label=": CHG 1 DD-MMM-YYYY" type="text">
             print("[STEP4] Filling Charge Nickname")
-            await fill_flutter_field(page, "CHG|nickname", claim["invoice_num"])
+            chg_field = page.locator('input[aria-label*="CHG"]')
+            await chg_field.wait_for(state="visible", timeout=15000)
+            await chg_field.click()
+            await asyncio.sleep(SHORT_WAIT / 1000)
+            await page.keyboard.press("Control+a")
+            await asyncio.sleep(0.1)
+            await page.keyboard.type(claim["invoice_num"], delay=30)
+            await page.keyboard.press("Tab")
+            await wait_for_flutter(page)
 
-            # 2. Doctor/Dentist/Pharmacy radio (pre-selected, but click to ensure)
-            doctor_radio = page.get_by_role("radio")
-            if await doctor_radio.count() > 0:
-                await doctor_radio.first.click()  # First radio = Doctor
-                await wait_for_flutter(page)
+            # 2. Doctor/Dentist radio — pre-selected, leave it
+            print("[STEP4] Doctor/Dentist radio pre-selected, skipping")
 
-            # 3. Select Provider
+            # 3. Select Provider — <input type="search" data-semantics-role="text-field">
+            # This is the FIRST type="search" field on the page
             print(f"[STEP4] Selecting provider: {claim['provider']}")
-            await select_dropdown(page, "Select Provider", claim["provider"])
+            search_fields = page.locator('input[type="search"][data-semantics-role="text-field"]')
+            provider_field = search_fields.first
+            await provider_field.wait_for(state="visible", timeout=15000)
+            await provider_field.click()
+            await asyncio.sleep(1)
+            await page.keyboard.type(claim["provider"][:20], delay=50)
+            await asyncio.sleep(2)
+            option = page.get_by_role("button", name=re.compile(re.escape(claim["provider"][:20]), re.IGNORECASE))
+            if await option.count() > 0:
+                await option.first.click()
+            else:
+                await page.keyboard.press("Enter")
+            await wait_for_flutter(page)
+
             await scroll_form(page)
 
-            # 4. Fill City (from claim data, not hardcoded)
+            # 4. City — <input aria-label=": (TextField)" type="text">
+            # Multiple fields share this label; City is the FIRST one visible
             if claim.get("city"):
                 print(f"[STEP4] Filling city: {claim['city']}")
-                # City field shows as textbox ": (TextField)" in accessibility tree
-                city_field = page.get_by_role("textbox", name=re.compile("TextField|city", re.IGNORECASE))
-                if await city_field.count() > 0:
-                    await city_field.first.click()
-                    await asyncio.sleep(SHORT_WAIT / 1000)
-                    await page.keyboard.press("Control+a")
-                    await page.keyboard.type(claim["city"], delay=30)
-                    await page.keyboard.press("Tab")
-                    await wait_for_flutter(page)
+                textfields = page.locator('input[aria-label=": (TextField)"][type="text"]')
+                city_field = textfields.first
+                await city_field.wait_for(state="visible", timeout=10000)
+                await city_field.click()
+                await asyncio.sleep(SHORT_WAIT / 1000)
+                await page.keyboard.press("Control+a")
+                await page.keyboard.type(claim["city"], delay=30)
+                await page.keyboard.press("Tab")
+                await wait_for_flutter(page)
 
-            # 5. Select Country of Treatment (from claim data, not hardcoded)
+            # 5. Country of Treatment — <input aria-label="Country of Treatment dropdown">
             if claim.get("country"):
                 print(f"[STEP4] Selecting country: {claim['country']}")
-                await select_dropdown(page, "Country of Treatment", claim["country"])
+                country_field = page.locator('input[aria-label="Country of Treatment dropdown"]')
+                await country_field.wait_for(state="visible", timeout=10000)
+                await country_field.click()
+                await asyncio.sleep(SHORT_WAIT / 1000)
+                await page.keyboard.press("Control+a")
+                await page.keyboard.type(claim["country"], delay=50)
+                await asyncio.sleep(1)
+                # Click matching option or press Enter
+                opt = page.get_by_role("button", name=re.compile(re.escape(claim["country"]), re.IGNORECASE))
+                if await opt.count() > 0:
+                    await opt.first.click()
+                else:
+                    await page.keyboard.press("Enter")
+                await wait_for_flutter(page)
 
             await scroll_form(page)
 
-            # 6. Fill Charge Amount
+            # 6. Charge Amount — second <input aria-label=": (TextField)">
             print(f"[STEP4] Filling charge amount: {claim['amount']}")
-            await fill_flutter_field(page, "charge.*amount|amount", claim["amount"])
+            textfields = page.locator('input[aria-label=": (TextField)"][type="text"]')
+            # After scrolling, the Amount field should be visible
+            # It's the next (TextField) after City; use nth(1) or find the visible one
+            amount_field = textfields.nth(1)
+            await amount_field.wait_for(state="visible", timeout=10000)
+            await amount_field.click()
+            await asyncio.sleep(SHORT_WAIT / 1000)
+            await page.keyboard.press("Control+a")
+            await page.keyboard.type(claim["amount"], delay=30)
+            await page.keyboard.press("Tab")
+            await wait_for_flutter(page)
 
-            # 7. Select Billed Invoice Currency
+            # 7. Billed Invoice Currency — <input aria-label="Billed Invoice Currency dropdown">
             print(f"[STEP4] Selecting currency: {claim['currency']}")
-            await select_dropdown(page, "Billed Invoice Currency|currency", claim["currency"])
+            currency_field = page.locator('input[aria-label="Billed Invoice Currency dropdown"]')
+            await currency_field.wait_for(state="visible", timeout=10000)
+            await currency_field.click()
+            await asyncio.sleep(SHORT_WAIT / 1000)
+            await page.keyboard.press("Control+a")
+            await page.keyboard.type(claim["currency"], delay=50)
+            await asyncio.sleep(1)
+            opt = page.get_by_role("button", name=re.compile(re.escape(claim["currency"]), re.IGNORECASE))
+            if await opt.count() > 0:
+                await opt.first.click()
+            else:
+                await page.keyboard.press("Enter")
+            await wait_for_flutter(page)
 
             await scroll_form(page)
 
-            # 8. Select Condition or Diagnosis
+            # 8. Condition/Diagnosis — second <input type="search"> (after Provider)
             print(f"[STEP4] Selecting diagnosis: {claim['diagnosis']}")
-            await select_dropdown(page, "Condition or Diagnosis", claim["diagnosis"])
+            search_fields = page.locator('input[type="search"][data-semantics-role="text-field"]')
+            diag_field = search_fields.nth(1)
+            await diag_field.wait_for(state="visible", timeout=10000)
+            await diag_field.click()
+            await asyncio.sleep(1)
+            await page.keyboard.type(claim["diagnosis"][:30], delay=50)
+            await asyncio.sleep(2)
+            opt = page.get_by_role("button", name=re.compile(re.escape(claim["diagnosis"][:20]), re.IGNORECASE))
+            if await opt.count() > 0:
+                await opt.first.click()
+            else:
+                await page.keyboard.press("Enter")
+            await wait_for_flutter(page)
 
-            # 9. Select Service Description
+            # 9. Service Description — <input aria-label="Service Description dropdown">
             print(f"[STEP4] Selecting service: {claim['procedure']}")
-            await select_dropdown(page, "Service Description", claim["procedure"])
+            service_field = page.locator('input[aria-label="Service Description dropdown"]')
+            await service_field.wait_for(state="visible", timeout=10000)
+            await service_field.click()
+            await asyncio.sleep(SHORT_WAIT / 1000)
+            await page.keyboard.press("Control+a")
+            await page.keyboard.type(claim["procedure"][:30], delay=50)
+            await asyncio.sleep(1)
+            opt = page.get_by_role("button", name=re.compile(re.escape(claim["procedure"][:20]), re.IGNORECASE))
+            if await opt.count() > 0:
+                await opt.first.click()
+            else:
+                await page.keyboard.press("Enter")
+            await wait_for_flutter(page)
 
             await scroll_form(page)
 
-            # 10. Select Start Date of Service
-            # Parse date — handle various formats from sheet
-            date_str = claim["date"]
-            try:
-                # Try YYYY-MM-DD first
-                date_obj = datetime.strptime(date_str, "%Y-%m-%d")
-            except ValueError:
-                try:
-                    # Try MM/DD/YYYY
-                    date_obj = datetime.strptime(date_str, "%m/%d/%Y")
-                except ValueError:
-                    try:
-                        # Try DD/MM/YYYY
-                        date_obj = datetime.strptime(date_str, "%d/%m/%Y")
-                    except ValueError:
-                        # Try natural language-ish formats
-                        date_obj = datetime.strptime(date_str, "%B %d, %Y")
+            # 10. Start Date — Flutter calendar picker
+            # Calendar days are <flt-semantics> with text like "Thu, 09 January 2026"
+            # Need to navigate months if needed, then click the correct day
+            print(f"[STEP4] Selecting start date: {date_obj.strftime('%Y-%m-%d')}")
+            start_btn = page.get_by_role("button", name=re.compile("Start Date of Service", re.IGNORECASE))
+            if await start_btn.count() > 0:
+                await start_btn.first.click()
+                await asyncio.sleep(2)
+                await _select_calendar_date(page, date_obj)
 
-            formatted_date = date_obj.strftime("%Y-%m-%d")
-
-            print(f"[STEP4] Selecting start date: {formatted_date}")
-            await select_date(page, "Start Date of Service", formatted_date)
-
-            # 11. Select End Date (same as start for single-day visits)
-            print(f"[STEP4] Selecting end date: {formatted_date}")
-            await select_date(page, "End Date of Service", formatted_date)
+            # 11. End Date — <input aria-label="mm/dd/yyyy" type="search">
+            print(f"[STEP4] Filling end date: {date_obj.strftime('%m/%d/%Y')}")
+            end_date_input = page.locator('input[aria-label="mm/dd/yyyy"]')
+            if await end_date_input.count() > 0:
+                await end_date_input.first.click()
+                await asyncio.sleep(SHORT_WAIT / 1000)
+                await page.keyboard.press("Control+a")
+                await page.keyboard.type(date_obj.strftime("%m/%d/%Y"), delay=30)
+                await page.keyboard.press("Tab")
+                await wait_for_flutter(page)
 
             await scroll_form(page)
 
@@ -1154,7 +1304,6 @@ async def step4_charges(page: Page, claim: Dict[str, Any]) -> None:
                 await asyncio.sleep(3)
 
             # After saving, click Next to proceed to step 5
-            # (The page may show a summary with option to add more charges)
             next_btn = page.get_by_role("button", name=re.compile("^next$", re.IGNORECASE))
             if await next_btn.count() > 0:
                 await next_btn.first.click()
