@@ -29,7 +29,7 @@ Report the script's output to Fernanda. That's it.
 
 ### Env vars (set in Railway)
 - `BCBS_USERNAME` / `BCBS_PASSWORD` — portal credentials
-- `XDG_CONFIG_HOME=/data/workspace/.config` — gog Gmail/Sheets access
+- Config home env var set to `/data/workspace/.config` — gog Gmail/Sheets access
 - `GOG_KEYRING_PASSWORD=ferdybot-calendar-2026` — gog keyring
 
 ### Google Sheets

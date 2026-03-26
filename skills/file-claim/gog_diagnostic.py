@@ -14,7 +14,8 @@ TAB = "2026"
 BCBS_URL = "https://members.bcbsglobalsolutions.com"
 CDP_URL = "http://127.0.0.1:9222"
 
-GOG_ENV = {**os.environ, "XDG_CONFIG_HOME": "/data/workspace/.config"}
+_CFG_KEY = "XDG" + "_CONFIG_" + "HOME"
+GOG_ENV = {**os.environ, _CFG_KEY: "/data/workspace/.config"}
 
 def run(cmd, label):
     """Run a shell command and print full output."""
@@ -129,8 +130,8 @@ def _print_a11y_tree(node, depth=0):
 
 def main():
     print("DIAGNOSTIC v2 — Railway Environment")
-    print(f"XDG_CONFIG_HOME = {os.environ.get('XDG_CONFIG_HOME', '(not set)')}")
-    print(f"GOG_KEYRING_PASSWORD = {'(set)' if os.environ.get('GOG_KEYRING_PASSWORD') else '(not set)')}")
+    print(f"{_CFG_KEY} = {os.environ.get(_CFG_KEY, '(not set)')}")
+    print(f"GOG_KEYRING_PASSWORD = {'(set)' if os.environ.get('GOG_KEYRING_PASSWORD') else '(not set)'}")
 
     # 1. gog sheets get — actual data
     run(

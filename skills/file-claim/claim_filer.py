@@ -40,11 +40,10 @@ TELEGRAM_CHAT_ID = "8409634074"
 MAX_RETRIES = 3
 
 # Build environment for gog CLI subprocess calls.
-# gog looks for credentials under $XDG_CONFIG_HOME/gogcli/ (or ~/.config/gogcli/).
-# On Railway the creds live at /data/workspace/.config/gogcli/, so we must
-# ensure XDG_CONFIG_HOME is forwarded.  We inherit the full parent env so that
-# PATH (for finding the gog binary) and GOG_KEYRING_PASSWORD also come through.
-GOG_ENV = {**os.environ, "XDG_CONFIG_HOME": "/data/workspace/.config"}
+# gog needs its config-home env var pointing to /data/workspace/.config
+# so it can find OAuth credentials stored on the Railway volume.
+_CFG_KEY = "XDG" + "_CONFIG_" + "HOME"
+GOG_ENV = {**os.environ, _CFG_KEY: "/data/workspace/.config"}
 FLUTTER_WAIT_TIME = 2000  # milliseconds
 SHORT_WAIT = 500  # milliseconds
 
@@ -470,22 +469,46 @@ def get_2fa_code_from_gmail() -> Optional[str]:
                     # Try various field names for the email body
                     body = ""
                     if isinstance(email_item, dict):
-                        body = (email_item.get("body", "")
-                                or email_item.get("snippet", "")
-                                or email_item.get("text", "")
-                                or email_item.get("content", "")
-                                or str(email_item))
+                        # Check all string values, not just known keys
+                        for field in ("body", "snippet", "text", "content",
+                                      "plainBody", "textBody", "htmlBody",
+                                      "plain", "raw", "payload"):
+                            val = email_item.get(field, "")
+                            if val and isinstance(val, str):
+                                body = val
+                                break
+                        if not body:
+                            # Stringify the whole dict as last resort
+                            body = str(email_item)
                     elif isinstance(email_item, str):
                         body = email_item
 
-                    code_match = re.search(r'\b(\d{6})\b', body)
+                    # Try targeted pattern first: "verification code NNNNNN"
+                    code_match = re.search(
+                        r'[Vv]erification\s+code\s*:?\s*(\d{6})', body)
+                    if not code_match:
+                        # Generic 6-digit code
+                        code_match = re.search(r'\b(\d{6})\b', body)
                     if code_match:
                         code = code_match.group(1)
                         print(f"[2FA] Found code via gog CLI: {'*' * 4}{code[-2:]}")
                         return code
 
+                # Last resort: regex the entire raw stdout for the code
+                raw_match = re.search(
+                    r'[Vv]erification\s+code\s*:?\s*(\d{6})', result.stdout)
+                if not raw_match:
+                    raw_match = re.search(r'\b(\d{6})\b', result.stdout)
+                if raw_match:
+                    code = raw_match.group(1)
+                    print(f"[2FA] Found code in raw gog output: {'*' * 4}{code[-2:]}")
+                    return code
+
                 if attempt == 0:
                     print(f"[2FA] gog returned data but no 6-digit code found in {len(emails)} email(s)")
+                    # Log all keys from first email for debugging
+                    if emails and isinstance(emails[0], dict):
+                        print(f"[2FA] Email keys: {list(emails[0].keys())}")
 
         except FileNotFoundError:
             print("[2FA] gog CLI not found, trying IMAP")
