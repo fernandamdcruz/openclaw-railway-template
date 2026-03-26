@@ -136,38 +136,136 @@ async def select_dropdown(page: Page, dropdown_pattern: str, value: str) -> None
     """
     Select a value from a Flutter dropdown.
 
-    Confirmed DOM pattern (2026-03-25):
-    - Dropdowns appear as textbox "Label dropdown" elements
-    - Click to open → Flutter overlay renders button options
-    - Click matching button option
+    Flutter Web dropdowns are notoriously difficult. This function tries
+    multiple strategies in order:
+    1. Click dropdown → find and click the option button in the overlay
+    2. If wrong value selected → close and re-open, try arrow keys
+    3. JavaScript injection as last resort
+
+    Known issue (2026-03-25): Patient dropdown defaults to first patient
+    alphabetically ("Mathias Jacobson") and resists keyboard filtering.
     """
     print(f"[DROPDOWN] Selecting '{value}' from dropdown matching '{dropdown_pattern}'")
+
+    # Strategy 1: Click dropdown, wait for overlay, click matching option
     try:
         dropdown = page.get_by_role("textbox", name=re.compile(dropdown_pattern, re.IGNORECASE))
         await dropdown.click()
-        await asyncio.sleep(1.5)  # Wait for Flutter overlay
+        await asyncio.sleep(2)  # Flutter overlays need time
 
-        # Try to type to filter if the dropdown supports search
+        # Look for the option as a button in the overlay
+        option = page.get_by_role("button", name=re.compile(re.escape(value), re.IGNORECASE))
+        if await option.count() > 0:
+            await option.first.click()
+            await wait_for_flutter(page)
+            print(f"[DROPDOWN] Strategy 1 succeeded: clicked option button")
+            return
+
+        # Try as generic text element (some Flutter dropdowns use text, not buttons)
+        option = page.get_by_text(value, exact=False)
+        if await option.count() > 0:
+            await option.first.click()
+            await wait_for_flutter(page)
+            print(f"[DROPDOWN] Strategy 1 succeeded: clicked text element")
+            return
+
+        # Close the overlay by pressing Escape before trying next strategy
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.5)
+    except Exception as e:
+        print(f"[DROPDOWN] Strategy 1 failed: {e}")
         try:
-            await page.keyboard.type(value[:10], delay=50)
+            await page.keyboard.press("Escape")
             await asyncio.sleep(0.5)
         except Exception:
             pass
 
-        # Click the matching option button
+    # Strategy 2: Click dropdown, use arrow keys to cycle through options
+    try:
+        dropdown = page.get_by_role("textbox", name=re.compile(dropdown_pattern, re.IGNORECASE))
+        await dropdown.click()
+        await asyncio.sleep(1.5)
+
+        # Try typing the first few characters to filter
+        await page.keyboard.type(value[:5], delay=80)
+        await asyncio.sleep(1)
+
+        # Check if a matching option appeared
         option = page.get_by_role("button", name=re.compile(re.escape(value), re.IGNORECASE))
         if await option.count() > 0:
             await option.first.click()
-        else:
-            # Try exact text match
-            option = page.get_by_text(value, exact=False)
-            if await option.count() > 0:
-                await option.first.click()
+            await wait_for_flutter(page)
+            print(f"[DROPDOWN] Strategy 2 succeeded: type-to-filter")
+            return
 
-        await wait_for_flutter(page)
-        print(f"[DROPDOWN] Successfully selected '{value}'")
+        # Try arrow keys (up to 10 options)
+        for i in range(10):
+            await page.keyboard.press("ArrowDown")
+            await asyncio.sleep(0.3)
+
+            # Check all visible buttons for match
+            buttons = page.get_by_role("button")
+            count = await buttons.count()
+            for j in range(count):
+                btn = buttons.nth(j)
+                text = await btn.inner_text()
+                if value.lower() in text.lower():
+                    await btn.click()
+                    await wait_for_flutter(page)
+                    print(f"[DROPDOWN] Strategy 2 succeeded: arrow key + click at position {i}")
+                    return
+
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.5)
     except Exception as e:
-        print(f"[ERROR] Failed to select from dropdown '{dropdown_pattern}': {str(e)}")
+        print(f"[DROPDOWN] Strategy 2 failed: {e}")
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+
+    # Strategy 3: JavaScript injection — find the flt-semantics element and
+    # dispatch events to simulate selection. This is the nuclear option.
+    try:
+        print(f"[DROPDOWN] Trying Strategy 3: JavaScript injection")
+        # Find all flt-semantics elements with the value text and click via JS
+        clicked = await page.evaluate(f"""
+            () => {{
+                const target = '{value.replace("'", "\\'")}';
+                const els = document.querySelectorAll('flt-semantics');
+                for (const el of els) {{
+                    const label = el.getAttribute('aria-label') || el.innerText || '';
+                    if (label.toLowerCase().includes(target.toLowerCase())) {{
+                        el.click();
+                        el.dispatchEvent(new MouseEvent('mousedown', {{bubbles: true}}));
+                        el.dispatchEvent(new MouseEvent('mouseup', {{bubbles: true}}));
+                        return true;
+                    }}
+                }}
+                // Also try button role elements
+                const buttons = document.querySelectorAll('[role="button"]');
+                for (const btn of buttons) {{
+                    const label = btn.getAttribute('aria-label') || btn.innerText || '';
+                    if (label.toLowerCase().includes(target.toLowerCase())) {{
+                        btn.click();
+                        return true;
+                    }}
+                }}
+                return false;
+            }}
+        """)
+
+        if clicked:
+            await wait_for_flutter(page)
+            print(f"[DROPDOWN] Strategy 3 succeeded: JavaScript injection")
+            return
+
+        # Last resort: click dropdown again, screenshot for debugging
+        await take_screenshot(page, f"dropdown_failed_{dropdown_pattern}")
+        raise Exception(f"All dropdown strategies failed for '{value}' in '{dropdown_pattern}'")
+
+    except Exception as e:
+        print(f"[ERROR] All dropdown strategies failed for '{dropdown_pattern}': {str(e)}")
         raise
 
 
@@ -329,7 +427,7 @@ def get_2fa_code_from_gmail() -> Optional[str]:
     for attempt in range(18):  # 18 attempts × 5s = 90s
         try:
             result = subprocess.run(
-                ["gog", "mail", "list", "--query", "from:bcbs OR from:geoblue verification code", "--max", "1", "--json"],
+                ["gog", "mail", "list", "--query", "from:noreply@bcbsglobalsolutions.com verification code", "--max", "1", "--json"],
                 capture_output=True, text=True, timeout=15
             )
             if result.returncode == 0:
@@ -369,7 +467,7 @@ def get_2fa_code_from_gmail() -> Optional[str]:
 
         for attempt in range(18):
             # Search for recent BCBS emails
-            _, message_ids = mail.search(None, '(OR (FROM "bcbs") (FROM "geoblue"))')
+            _, message_ids = mail.search(None, '(FROM "noreply@bcbsglobalsolutions.com")')
             if message_ids[0]:
                 ids = message_ids[0].split()
                 # Get the most recent one

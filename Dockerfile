@@ -27,6 +27,7 @@ RUN apt-get update \
  RUN corepack enable && pnpm install --frozen-lockfile --prod
 
  COPY src ./src
+ COPY skills ./skills
  COPY --chmod=755 entrypoint.sh ./entrypoint.sh
 
  # Install Playwright Chromium with system dependencies if OPENCLAW_INSTALL_BROWSER=1

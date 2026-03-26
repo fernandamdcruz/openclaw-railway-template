@@ -78,6 +78,16 @@ if [ ! -d /data/.linuxbrew ]; then
  echo "[entrypoint] No Chromium found, skipping browser start"
  fi
 
+ # Deploy skills from Docker image to workspace volume so FerdyBot can find them
+ # This ensures claim_filer.py and other skills are always up-to-date after each deploy
+ if [ -d /app/skills ]; then
+ SKILLS_DEST="/data/workspace/skills"
+ mkdir -p "$SKILLS_DEST"
+ cp -a /app/skills/* "$SKILLS_DEST/" 2>/dev/null || true
+ chown -R openclaw:openclaw "$SKILLS_DEST" 2>/dev/null || true
+ echo "[entrypoint] Skills deployed to $SKILLS_DEST"
+ fi
+
  # Clean stale lock/pid files from previous container (prevents "gateway already running" errors)
  rm -f /data/.openclaw/*.lock /data/.openclaw/*.pid /tmp/.openclaw*.lock 2>/dev/null || true
  echo "[entrypoint] Starting server..."
