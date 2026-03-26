@@ -806,6 +806,40 @@ def notify_telegram(claim: Dict[str, Any], reference_number: str) -> None:
         print(f"[WARN] Telegram notification failed: {str(e)}")
 
 
+def notify_telegram_summary(total: int, filed: int, failures: list) -> None:
+    """Send a Telegram summary after all claims are processed."""
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not bot_token:
+        return
+
+    if filed == total and total > 0:
+        msg = f"All {total} claim(s) filed successfully!"
+    elif filed == 0:
+        msg = f"FAILED: None of the {total} claim(s) could be filed."
+    else:
+        msg = f"Partial: {filed}/{total} claim(s) filed."
+
+    if failures:
+        msg += "\n\nFailed claims:"
+        for inv, err in failures:
+            # Truncate error to keep message readable
+            short_err = str(err)[:120]
+            msg += f"\n- {inv}: {short_err}"
+
+    msg += f"\n\nTimestamp: {datetime.now().strftime('%H:%M %d-%b-%Y')}"
+
+    try:
+        subprocess.run(
+            ["curl", "-s", "-X", "POST",
+             f"https://api.telegram.org/bot{bot_token}/sendMessage",
+             "-d", f"chat_id={TELEGRAM_CHAT_ID}",
+             "-d", f"text={msg}"],
+            timeout=10, check=False
+        )
+    except Exception:
+        pass
+
+
 # ============================================================================
 # AUTHENTICATION
 # ============================================================================
@@ -1034,28 +1068,57 @@ async def step2_basic_info(page: Page, claim: Dict[str, Any]) -> None:
             await page.keyboard.press("Tab")
             await wait_for_flutter(page)
 
-            # Select patient — uses a searchbox (type="search")
-            # It's the first "combobox" or "searchbox" role on the page
+            # Select patient — Flutter renders it as type="search" which
+            # maps to different ARIA roles depending on the build.
+            # Strategy: Tab from nick name into the patient field, then type.
             print("[STEP2] Selecting patient")
-            # Try searchbox role first, fall back to second textbox
-            patient_field = page.get_by_role("combobox")
-            if await patient_field.count() == 0:
-                patient_field = page.get_by_role("searchbox")
-            if await patient_field.count() == 0:
-                # Fall back to all textboxes, patient is the second one
-                patient_field = all_textboxes.nth(1)
-            await patient_field.first.wait_for(state="visible", timeout=15000)
-            await patient_field.first.click()
-            await asyncio.sleep(1)
-            await page.keyboard.type(claim["patient"], delay=50)
-            await asyncio.sleep(2)
-            # Click the matching option in the dropdown overlay
-            option = page.get_by_role("button", name=re.compile(re.escape(claim["patient"]), re.IGNORECASE))
-            if await option.count() > 0:
-                await option.first.click()
-            else:
-                await page.keyboard.press("Enter")
-            await wait_for_flutter(page)
+            await asyncio.sleep(2)  # Let Flutter settle after Tab
+
+            # Re-query all interactive fields after the Tab/Flutter redraw
+            patient_field = None
+            for role in ["combobox", "searchbox"]:
+                loc = page.get_by_role(role)
+                if await loc.count() > 0:
+                    patient_field = loc.first
+                    print(f"[STEP2] Found patient field via role='{role}'")
+                    break
+
+            if patient_field is None:
+                # Fall back: re-query textboxes, patient is the 2nd one
+                fresh_textboxes = page.get_by_role("textbox")
+                count = await fresh_textboxes.count()
+                print(f"[STEP2] No combobox/searchbox found. Textbox count={count}")
+                if count >= 2:
+                    patient_field = fresh_textboxes.nth(1)
+                else:
+                    # Last resort: just Tab forward from nick name
+                    print("[STEP2] Using Tab navigation to reach patient field")
+                    await page.keyboard.press("Tab")
+                    await asyncio.sleep(1)
+                    await page.keyboard.type(claim["patient"], delay=50)
+                    await asyncio.sleep(2)
+                    option = page.get_by_role("button", name=re.compile(re.escape(claim["patient"]), re.IGNORECASE))
+                    if await option.count() > 0:
+                        await option.first.click()
+                    else:
+                        await page.keyboard.press("Enter")
+                    await wait_for_flutter(page)
+                    # Skip the normal patient_field click below
+                    patient_field = "DONE"
+
+            if patient_field and patient_field != "DONE":
+                await patient_field.wait_for(state="visible", timeout=15000)
+                await patient_field.click()
+                await asyncio.sleep(1)
+                await page.keyboard.type(claim["patient"], delay=50)
+                await asyncio.sleep(2)
+                # Click the matching option in the dropdown overlay
+                option = page.get_by_role("button", name=re.compile(re.escape(claim["patient"]), re.IGNORECASE))
+                if await option.count() > 0:
+                    await option.first.click()
+                else:
+                    await page.keyboard.press("Enter")
+                await wait_for_flutter(page)
 
             # Dismiss any NOTICE popup
             await asyncio.sleep(1)
@@ -1604,10 +1667,15 @@ async def main():
 
             # File each claim
             filed_count = 0
+            failures = []
             for idx, claim in enumerate(claims, start=1):
                 print(f"\n[MAIN] Processing claim {idx}/{len(claims)}")
 
-                reference_number = await file_single_claim(page, claim)
+                try:
+                    reference_number = await file_single_claim(page, claim)
+                except Exception as e:
+                    reference_number = None
+                    print(f"[MAIN] Exception filing claim: {e}")
 
                 if reference_number:
                     update_sheets(claim["row_number"], reference_number)
@@ -1618,14 +1686,23 @@ async def main():
                         print("[MAIN] Waiting before next claim...")
                         await asyncio.sleep(5)
                 else:
+                    failures.append((claim["invoice_num"], "Step failed — see logs"))
                     print(f"[MAIN] Skipping sheet update for failed claim {claim['invoice_num']}")
 
             print(f"\n{'='*70}")
             print(f"[MAIN] Complete — Filed {filed_count}/{len(claims)} claims")
             print(f"[MAIN] Timestamp: {datetime.now().isoformat()}")
             print(f"{'='*70}\n")
+
+            # Always send a summary so Fernanda knows the run finished
+            notify_telegram_summary(len(claims), filed_count, failures)
         except Exception as e:
             print(f"[ERROR] Fatal error: {str(e)}")
+            # Notify even on fatal crash
+            notify_telegram_summary(
+                len(claims) if claims else 0, 0,
+                [("ALL", str(e)[:200])]
+            )
             raise
         finally:
             print("[MAIN] Disconnecting from browser")
