@@ -1229,14 +1229,58 @@ async def step4_charges(page: Page, claim: Dict[str, Any]) -> None:
             # 2. Doctor/Dentist radio — pre-selected, leave it
             print("[STEP4] Doctor/Dentist radio pre-selected, skipping")
 
-            # 3. Select Provider — first combobox/searchbox on the page
+            # 3. Select Provider — could be combobox, searchbox, or textbox
+            #    with name containing "Provider"
             print(f"[STEP4] Selecting provider: {claim['provider']}")
-            provider_field = page.get_by_role("combobox")
-            if await provider_field.count() == 0:
-                provider_field = page.get_by_role("searchbox")
-            await provider_field.first.wait_for(state="visible", timeout=15000)
-            await provider_field.first.click()
-            await asyncio.sleep(1)
+            provider_field = None
+
+            # Debug: log what roles are present
+            for role in ["combobox", "searchbox"]:
+                cnt = await page.get_by_role(role).count()
+                print(f"[STEP4] DEBUG role='{role}' count={cnt}")
+
+            # Try combobox first
+            loc = page.get_by_role("combobox")
+            if await loc.count() > 0:
+                provider_field = loc.first
+                print("[STEP4] Found provider via role='combobox'")
+
+            # Try searchbox
+            if provider_field is None:
+                loc = page.get_by_role("searchbox")
+                if await loc.count() > 0:
+                    provider_field = loc.first
+                    print("[STEP4] Found provider via role='searchbox'")
+
+            # Try textbox with "Provider" in the name
+            if provider_field is None:
+                loc = page.get_by_role("textbox", name=re.compile("Provider", re.IGNORECASE))
+                if await loc.count() > 0:
+                    provider_field = loc.first
+                    print("[STEP4] Found provider via textbox name='Provider'")
+
+            # Fall back to second textbox (first is charge nickname)
+            if provider_field is None:
+                fresh = page.get_by_role("textbox")
+                cnt = await fresh.count()
+                print(f"[STEP4] Fallback: total textboxes={cnt}")
+                if cnt >= 2:
+                    provider_field = fresh.nth(1)
+                    print("[STEP4] Using second textbox as provider")
+
+            if provider_field is None:
+                # Last resort: Tab from charge nickname
+                print("[STEP4] Last resort: Tab navigation to provider")
+                await page.keyboard.press("Tab")
+                await asyncio.sleep(1)
+                await page.keyboard.press("Tab")  # skip radio
+                await asyncio.sleep(1)
+
+            if provider_field:
+                await provider_field.wait_for(state="visible", timeout=15000)
+                await provider_field.click()
+                await asyncio.sleep(1)
+
             await page.keyboard.type(claim["provider"][:20], delay=50)
             await asyncio.sleep(2)
             option = page.get_by_role("button", name=re.compile(re.escape(claim["provider"][:20]), re.IGNORECASE))
@@ -1311,15 +1355,41 @@ async def step4_charges(page: Page, claim: Dict[str, Any]) -> None:
 
             await scroll_form(page)
 
-            # 8. Condition/Diagnosis — second combobox/searchbox (first was Provider)
+            # 8. Condition/Diagnosis — try combobox, searchbox, or textbox
+            #    with "Diagnosis" or "Condition" in the name
             print(f"[STEP4] Selecting diagnosis: {claim['diagnosis']}")
-            combo_fields = page.get_by_role("combobox")
-            if await combo_fields.count() == 0:
-                combo_fields = page.get_by_role("searchbox")
-            if await combo_fields.count() > 1:
-                await combo_fields.nth(1).click()
+            diag_field = None
+
+            # Try textbox with Diagnosis/Condition in name first (most specific)
+            loc = page.get_by_role("textbox", name=re.compile("Diagnosis|Condition", re.IGNORECASE))
+            if await loc.count() > 0:
+                diag_field = loc.first
+                print("[STEP4] Found diagnosis via textbox name")
+
+            # Try combobox (second one, first was Provider)
+            if diag_field is None:
+                loc = page.get_by_role("combobox")
+                cnt = await loc.count()
+                if cnt > 1:
+                    diag_field = loc.nth(1)
+                    print(f"[STEP4] Found diagnosis via combobox.nth(1), count={cnt}")
+                elif cnt == 1:
+                    diag_field = loc.first
+                    print("[STEP4] Found diagnosis via combobox.first (only one)")
+
+            # Try searchbox
+            if diag_field is None:
+                loc = page.get_by_role("searchbox")
+                cnt = await loc.count()
+                if cnt > 0:
+                    diag_field = loc.nth(min(1, cnt - 1))
+                    print(f"[STEP4] Found diagnosis via searchbox, count={cnt}")
+
+            if diag_field:
+                await diag_field.click()
             else:
-                await combo_fields.first.click()
+                print("[STEP4] WARN: No diagnosis field found, using Tab")
+                await page.keyboard.press("Tab")
             await asyncio.sleep(1)
             await page.keyboard.type(claim["diagnosis"][:30], delay=50)
             await asyncio.sleep(2)
