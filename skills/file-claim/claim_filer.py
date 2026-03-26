@@ -38,6 +38,13 @@ GOOGLE_SHEET_ID = "1wU7iuAH7mZdenIKNAyrUFuJkVjZsYjxeL07NzqUwMYk"
 GOOGLE_SHEET_TAB = "2026"
 TELEGRAM_CHAT_ID = "8409634074"
 MAX_RETRIES = 3
+
+# Build environment for gog CLI subprocess calls.
+# gog looks for credentials under $XDG_CONFIG_HOME/gogcli/ (or ~/.config/gogcli/).
+# On Railway the creds live at /data/workspace/.config/gogcli/, so we must
+# ensure XDG_CONFIG_HOME is forwarded.  We inherit the full parent env so that
+# PATH (for finding the gog binary) and GOG_KEYRING_PASSWORD also come through.
+GOG_ENV = {**os.environ, "XDG_CONFIG_HOME": "/data/workspace/.config"}
 FLUTTER_WAIT_TIME = 2000  # milliseconds
 SHORT_WAIT = 500  # milliseconds
 
@@ -430,7 +437,7 @@ def get_2fa_code_from_gmail() -> Optional[str]:
         try:
             result = subprocess.run(
                 ["gog", "gmail", "search", "from:noreply@bcbsglobalsolutions.com verification code", "--max", "1", "--json"],
-                capture_output=True, text=True, timeout=15
+                capture_output=True, text=True, timeout=15, env=GOG_ENV
             )
             if result.returncode == 0:
                 emails = json.loads(result.stdout)
@@ -534,7 +541,7 @@ def read_pending_claims() -> List[Dict[str, Any]]:
     try:
         result = subprocess.run(
             ["gog", "sheets", "get", GOOGLE_SHEET_ID, f"'{GOOGLE_SHEET_TAB}'!A:M", "--json"],
-            capture_output=True, text=True, timeout=30
+            capture_output=True, text=True, timeout=30, env=GOG_ENV
         )
 
         if result.returncode == 0:
@@ -615,7 +622,7 @@ def update_sheets(row_number: int, reference_number: str) -> None:
              f"'{GOOGLE_SHEET_TAB}'!K{row_number}",
              "--values-json", json.dumps([["Filed"]]),
              "--input", "USER_ENTERED"],
-            timeout=30, check=True
+            timeout=30, check=True, env=GOG_ENV
         )
         # Update column M (reference number)
         subprocess.run(
@@ -623,7 +630,7 @@ def update_sheets(row_number: int, reference_number: str) -> None:
              f"'{GOOGLE_SHEET_TAB}'!M{row_number}",
              "--values-json", json.dumps([[reference_number]]),
              "--input", "USER_ENTERED"],
-            timeout=30, check=True
+            timeout=30, check=True, env=GOG_ENV
         )
         print(f"[SHEETS] Successfully updated row {row_number}")
     except Exception as e:
@@ -1224,7 +1231,7 @@ async def upload_document(page: Page, drive_link: str) -> None:
         print(f"[UPLOAD] Downloading file: {file_id}")
         result = subprocess.run(
             ["gog", "drive", "download", file_id, "--out", temp_file],
-            timeout=60, capture_output=True, text=True
+            timeout=60, capture_output=True, text=True, env=GOG_ENV
         )
 
         if result.returncode != 0:

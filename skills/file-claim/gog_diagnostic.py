@@ -11,6 +11,9 @@ import sys
 SHEET_ID = "1wU7iuAH7mZdenIKNAyrUFuJkVjZsYjxeL07NzqUwMYk"
 TAB = "2026"
 
+# Ensure gog finds its credentials
+GOG_ENV = {**os.environ, "XDG_CONFIG_HOME": "/data/workspace/.config"}
+
 def run(cmd, label):
     """Run a command and print full output."""
     print(f"\n{'='*60}")
@@ -18,7 +21,7 @@ def run(cmd, label):
     print(f"CMD:  {' '.join(cmd)}")
     print(f"{'='*60}")
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=GOG_ENV)
         print(f"EXIT CODE: {result.returncode}")
         if result.stdout:
             # Truncate very long output
