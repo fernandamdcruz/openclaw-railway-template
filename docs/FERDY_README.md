@@ -84,6 +84,35 @@ This needs testing to confirm it works.
 
 ---
 
+## Refreshing gog OAuth Token (when Google Sheets/Gmail stop working)
+
+gog's OAuth token expires periodically. When this happens, the claim filing script fails at the very start because it can't read pending claims from Google Sheets.
+
+**Symptom**: Script errors with OAuth/token/authentication failure when trying to access Sheets or Gmail.
+
+**How to fix** (takes ~2 minutes):
+
+1. Tell FerdyBot to run this command:
+   ```
+   GOG_KEYRING_PASSWORD=ferdybot-calendar-2026 XDG_CONFIG_HOME=/data/workspace/.config gog auth add fernanda.mdcruz@gmail.com --services user --manual
+   ```
+
+2. FerdyBot will reply with a long Google authorization URL starting with `https://accounts.google.com/o/oauth2/auth?...`
+
+3. Open that URL in Safari on your Mac. Sign into Google and approve access.
+
+4. Your browser will redirect to a URL starting with `http://127.0.0.1:XXXXX/oauth2/callback?...` — the page won't load (that's normal).
+
+5. Copy the **entire URL** from Safari's address bar.
+
+6. Paste that URL back to **FerdyBot** (not Cowork). FerdyBot's terminal is waiting for it.
+
+7. FerdyBot should confirm the auth succeeded. You can then ask it to file claims again.
+
+**Important**: gog is only installed inside the Railway container. You cannot run `gog` on your Mac. The auth flow must go through FerdyBot.
+
+---
+
 ## Fix Script (tested and working)
 
 This Node.js inline script was used to fix the config. It:
