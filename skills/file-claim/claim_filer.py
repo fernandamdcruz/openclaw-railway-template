@@ -466,6 +466,56 @@ async def _select_calendar_date(page: Page, date_obj: datetime) -> None:
         print("[DATE] Confirmed date selection")
 
 
+async def dump_page_state(page: Page, label: str) -> None:
+    """Dump what Playwright can see on the page for debugging.
+    Logs counts of key ARIA roles and the page title/URL."""
+    print(f"\n[DIAG:{label}] URL: {page.url}")
+    print(f"[DIAG:{label}] Title: {await page.title()}")
+    roles_to_check = [
+        "textbox", "combobox", "searchbox", "button", "radio",
+        "checkbox", "link", "heading", "dialog", "tab", "listbox",
+    ]
+    for role in roles_to_check:
+        try:
+            count = await page.get_by_role(role).count()
+            if count > 0:
+                print(f"[DIAG:{label}] role='{role}' count={count}")
+        except Exception:
+            pass
+
+    # Also try to get accessible names of first few textboxes
+    for role in ["textbox", "combobox", "searchbox"]:
+        try:
+            loc = page.get_by_role(role)
+            count = await loc.count()
+            for i in range(min(count, 5)):
+                try:
+                    name = await loc.nth(i).get_attribute("aria-label")
+                    tag = await loc.nth(i).evaluate("el => el.tagName")
+                    print(f"[DIAG:{label}] {role}[{i}] tag={tag} aria-label='{name}'")
+                except Exception:
+                    print(f"[DIAG:{label}] {role}[{i}] (could not read attrs)")
+        except Exception:
+            pass
+
+    # Check if there are any flt-semantics elements at all
+    try:
+        flt_count = await page.locator("flt-semantics").count()
+        print(f"[DIAG:{label}] flt-semantics elements: {flt_count}")
+    except Exception:
+        pass
+
+    # Check for iframes
+    try:
+        iframe_count = await page.locator("iframe").count()
+        if iframe_count > 0:
+            print(f"[DIAG:{label}] WARNING: {iframe_count} iframe(s) found — content may be inside iframe")
+    except Exception:
+        pass
+
+    print(f"[DIAG:{label}] --- end dump ---\n")
+
+
 async def close_popup(page: Page) -> None:
     """Close any popup/dialog that may appear (Important Update, NOTICE, etc.)."""
     try:
@@ -1052,6 +1102,9 @@ async def step2_basic_info(page: Page, claim: Dict[str, Any]) -> None:
 
     for attempt in range(MAX_RETRIES):
         try:
+            # Dump what Playwright can see before we try anything
+            await dump_page_state(page, "STEP2")
+
             # Fill eClaim Nick Name
             # Flutter renders <flt-semantics> textbox nodes; the <input> only
             # appears AFTER the field is focused.  Use role-based locator to
@@ -1208,6 +1261,7 @@ async def step4_charges(page: Page, claim: Dict[str, Any]) -> None:
 
     for attempt in range(MAX_RETRIES):
         try:
+            await dump_page_state(page, "STEP4")
             await scroll_form_to_top(page)
             await asyncio.sleep(0.5)
 
