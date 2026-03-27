@@ -1160,7 +1160,7 @@ async def navigate_to_eclaim(page: Page) -> None:
 
         await dump_page_state(page, "NAV_DASHBOARD")
 
-        # Click "eClaims" on dashboard
+        # Click "eClaims" on dashboard — MUST find this button
         eclaims_btn = page.get_by_role("button", name=re.compile("eclaim", re.IGNORECASE))
         btn_count = await eclaims_btn.count()
         print(f"[NAV] eClaims button count: {btn_count}")
@@ -1170,7 +1170,7 @@ async def navigate_to_eclaim(page: Page) -> None:
             await wait_for_flutter(page)
             print(f"[NAV] After eClaims click, URL: {page.url}")
         else:
-            # Maybe we're already on eClaim page or need link instead of button
+            # Try as link
             eclaims_link = page.get_by_role("link", name=re.compile("eclaim", re.IGNORECASE))
             if await eclaims_link.count() > 0:
                 await eclaims_link.first.click()
@@ -1178,10 +1178,20 @@ async def navigate_to_eclaim(page: Page) -> None:
                 await wait_for_flutter(page)
                 print(f"[NAV] Clicked eClaims link, URL: {page.url}")
             else:
-                print("[NAV] WARNING: No eClaims button or link found on dashboard")
-                await take_screenshot(page, "nav_no_eclaims_button")
+                # Try clicking by text content as last resort
+                eclaims_text = page.locator("text=/eclaim/i")
+                if await eclaims_text.count() > 0:
+                    await eclaims_text.first.click()
+                    await asyncio.sleep(3)
+                    await wait_for_flutter(page)
+                    print(f"[NAV] Clicked eClaims text, URL: {page.url}")
+                else:
+                    await take_screenshot(page, "nav_no_eclaims_button")
+                    raise Exception("FATAL: Cannot find eClaims button, link, or text on dashboard")
 
-        # Click "File an eClaim"
+        await dismiss_popups(page)
+
+        # Click "File an eClaim" — MUST find this
         file_btn = page.get_by_role("button", name=re.compile("file.*claim|file an.*claim", re.IGNORECASE))
         btn_count = await file_btn.count()
         print(f"[NAV] File eClaim button count: {btn_count}")
@@ -1190,25 +1200,54 @@ async def navigate_to_eclaim(page: Page) -> None:
             await asyncio.sleep(3)
             await wait_for_flutter(page)
         else:
-            print("[NAV] WARNING: No 'File an eClaim' button found")
+            # Try text locator
+            file_text = page.locator("text=/file.*claim/i")
+            if await file_text.count() > 0:
+                await file_text.first.click()
+                await asyncio.sleep(3)
+                await wait_for_flutter(page)
+            else:
+                await take_screenshot(page, "nav_no_file_claim_button")
+                raise Exception("FATAL: Cannot find 'File an eClaim' button on eClaims page")
+
+        await dismiss_popups(page)
 
         # Click "Get started" for Paperless Form
-        start_btn = page.get_by_role("button", name=re.compile("get started|start", re.IGNORECASE))
+        start_btn = page.get_by_role("button", name=re.compile("get started|start|paperless", re.IGNORECASE))
         btn_count = await start_btn.count()
         print(f"[NAV] Get started button count: {btn_count}")
         if btn_count > 0:
             await start_btn.first.click()
             await asyncio.sleep(3)
             await wait_for_flutter(page)
+        else:
+            await take_screenshot(page, "nav_no_get_started_button")
+            raise Exception("FATAL: Cannot find 'Get started' / 'Paperless Form' button")
 
         await dismiss_popups(page)
         print(f"[NAV] Final URL: {page.url}")
         await take_screenshot(page, "nav_eclaim_wizard")
-        print("[NAV] Navigated to eClaim wizard")
+
+        # VERIFY: We should now see Step 1 elements (PRIMARY MEMBER button or similar)
+        verify = page.get_by_role("button", name=re.compile("primary member|next|bank wire", re.IGNORECASE))
+        if await verify.count() == 0:
+            await take_screenshot(page, "nav_verification_failed")
+            raise Exception("FATAL: Navigation completed but Step 1 elements not found — not on the wizard")
+
+        print("[NAV] Navigated to eClaim wizard (verified)")
     except Exception as e:
         print(f"[ERROR] Failed to navigate to eClaim: {str(e)}")
         await take_screenshot(page, "nav_error")
         raise
+
+
+async def _verify_step_transition(page: Page, label: str) -> None:
+    """Take a screenshot and log the URL after each step transition.
+    Helps diagnose when navigation goes wrong between steps."""
+    await asyncio.sleep(1)
+    await dismiss_popups(page)
+    print(f"[VERIFY:{label}] URL: {page.url}")
+    await take_screenshot(page, label)
 
 
 # ============================================================================
@@ -1229,8 +1268,14 @@ async def step1_preliminary(page: Page) -> None:
 
     for attempt in range(MAX_RETRIES):
         try:
-            # Select PRIMARY MEMBER
+            # Verify we're on the right page — must find at least one expected element
             member_btn = page.get_by_role("button", name=re.compile("primary member", re.IGNORECASE))
+            wire_btn = page.get_by_role("button", name=re.compile("bank wire|ach|wire transfer", re.IGNORECASE))
+            if await member_btn.count() == 0 and await wire_btn.count() == 0:
+                await take_screenshot(page, "step1_wrong_page")
+                raise Exception("STEP1: Neither 'Primary Member' nor 'Bank Wire' buttons found — wrong page")
+
+            # Select PRIMARY MEMBER
             if await member_btn.count() > 0:
                 await member_btn.first.click()
                 await wait_for_flutter(page)
@@ -1914,10 +1959,15 @@ async def file_single_claim(page: Page, claim: Dict[str, Any]) -> Optional[str]:
         await dismiss_popups(page)
 
         await step1_preliminary(page)
+        await _verify_step_transition(page, "after_step1")
         await step2_basic_info(page, claim)
+        await _verify_step_transition(page, "after_step2")
         await step3_other_insurance(page)
+        await _verify_step_transition(page, "after_step3")
         await step4_charges(page, claim)
+        await _verify_step_transition(page, "after_step4")
         await step5_reimbursement(page)
+        await _verify_step_transition(page, "after_step5")
         reference_number = await step6_authorization(page)
 
         # Upload supporting document
