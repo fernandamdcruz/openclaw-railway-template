@@ -630,15 +630,19 @@ def get_2fa_code_from_gmail(login_epoch: int = 0) -> Optional[str]:
                 print(f"[2FA] get exit code: {get_result.returncode}")
                 print(f"[2FA] get stdout (first 500 chars): {get_result.stdout[:500]}")
 
-            # Search the full get output for the 6-digit code
+            # Search the full get output for 6-digit codes
+            # The thread may contain multiple messages with old codes.
+            # We need the LAST (most recent) code, not the first.
             full_output = get_result.stdout
-            code_match = re.search(
+            all_codes = re.findall(
                 r'[Vv]erification\s+code\s*:?\s*(\d{6})', full_output)
-            if not code_match:
-                code_match = re.search(r'\b(\d{6})\b', full_output)
-            if code_match:
-                code = code_match.group(1)
-                print(f"[2FA] Found code via gog CLI: {'*' * 4}{code[-2:]}")
+            if not all_codes:
+                all_codes = re.findall(r'\b(\d{6})\b', full_output)
+            if all_codes:
+                code = all_codes[-1]  # Last = most recent message in thread
+                print(f"[2FA] Found {len(all_codes)} code(s) in thread, using latest: {'*' * 4}{code[-2:]}")
+                if len(all_codes) > 1:
+                    print(f"[2FA] All codes found (oldest→newest): {['****' + c[-2:] for c in all_codes]}")
                 return code
 
             if attempt == 0:
