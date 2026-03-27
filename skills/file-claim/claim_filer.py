@@ -532,32 +532,41 @@ async def close_popup(page: Page) -> None:
 # 2FA — EMAIL CODE RETRIEVAL
 # ============================================================================
 
-def get_2fa_code_from_gmail() -> Optional[str]:
+def get_2fa_code_from_gmail(login_epoch: int = 0) -> Optional[str]:
     """
     Retrieve the BCBS 2FA verification code from Gmail.
 
-    Tries two methods:
-    1. gog CLI (if available on Railway): `gog mail list`
-    2. IMAP direct connection using BCBS_GMAIL_APP_PASSWORD env var
+    login_epoch: unix timestamp of when login was submitted. Only emails
+    arriving AFTER this time will be considered, preventing stale codes.
 
-    Searches for the most recent email from BCBS containing a verification code.
+    Tries gog CLI first, falls back to IMAP.
     Retries for up to 90 seconds waiting for the email to arrive.
     """
     print("[2FA] Retrieving verification code from Gmail")
 
-    # Method 1: Try gog CLI first (available on Railway)
     import time
 
-    # Wait 10s on the first attempt to give the email time to arrive
-    print("[2FA] Waiting 10s for verification email to arrive...")
-    time.sleep(10)
+    # Build the Gmail search query with a time filter
+    # Gmail's `after:` operator takes a unix epoch timestamp
+    base_query = "from:noreply@bcbsglobalsolutions.com verification code"
+    if login_epoch > 0:
+        # Subtract 30s buffer in case of clock drift
+        after_ts = login_epoch - 30
+        search_query = f"{base_query} after:{after_ts}"
+        print(f"[2FA] Only accepting emails after epoch {after_ts} (login was at {login_epoch})")
+    else:
+        search_query = f"{base_query} newer_than:5m"
+        print("[2FA] No login epoch provided, using newer_than:5m")
+
+    # Wait 15s on the first attempt to give the email time to arrive
+    print("[2FA] Waiting 15s for verification email to arrive...")
+    time.sleep(15)
 
     for attempt in range(18):  # 18 attempts × 5s = 90s
         try:
             # STEP 1: Search for the 2FA email (returns metadata only)
-            # Use newer_than:15m to avoid picking up old codes from previous attempts
             result = subprocess.run(
-                ["gog", "gmail", "search", "from:noreply@bcbsglobalsolutions.com verification code newer_than:15m", "--max", "1", "--json"],
+                ["gog", "gmail", "search", search_query, "--max", "1", "--json"],
                 capture_output=True, text=True, timeout=15, env=GOG_ENV
             )
             if attempt == 0:
@@ -942,14 +951,18 @@ async def login(page: Page) -> None:
         print("[AUTH] Password entered")
 
         # Submit: <input type="submit" value="SIGN IN">
-        print("[AUTH] Clicking SIGN IN")
+        # Record the time BEFORE clicking so we only accept 2FA emails
+        # that arrive AFTER this moment (avoids stale codes)
+        import time as _time
+        login_submit_epoch = int(_time.time())
+        print(f"[AUTH] Clicking SIGN IN (epoch: {login_submit_epoch})")
         submit_btn = page.locator('input[type="submit"][value="SIGN IN"]')
         await submit_btn.click()
         await asyncio.sleep(5)  # Wait for redirect back to portal
         await take_screenshot(page, "after_sign_in")
 
         # Check if 2FA is required
-        await handle_2fa(page)
+        await handle_2fa(page, login_submit_epoch)
 
         # Wait for redirect back to the Flutter portal after auth
         print("[AUTH] Waiting for post-login redirect...")
@@ -979,10 +992,12 @@ async def login(page: Page) -> None:
         raise
 
 
-async def handle_2fa(page: Page) -> None:
+async def handle_2fa(page: Page, login_epoch: int = 0) -> None:
     """
     Handle 2FA if the verification code screen appears.
     Gets the code from Gmail (via gog CLI or IMAP).
+    login_epoch: unix timestamp of when SIGN IN was clicked — only accept
+    emails newer than this to avoid stale codes.
     """
     try:
         code_field = page.get_by_role("textbox", name=re.compile("code|otp|2fa|verif", re.IGNORECASE))
@@ -991,7 +1006,7 @@ async def handle_2fa(page: Page) -> None:
             return
 
         print("[2FA] 2FA field detected — retrieving code from email")
-        code = get_2fa_code_from_gmail()
+        code = get_2fa_code_from_gmail(login_epoch)
 
         if not code:
             raise Exception("Could not retrieve 2FA code from email")
