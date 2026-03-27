@@ -1844,7 +1844,10 @@ async def main():
             print(f"[MAIN] Connecting to Chrome CDP at {CDP_URL}")
             browser = await p.chromium.connect_over_cdp(CDP_URL)
             context = browser.contexts[0]
-            page = context.pages[0] if context.pages else await context.new_page()
+            # Always open a fresh page to avoid dirty state from previous
+            # sessions or manual browser use by FerdyBot
+            page = await context.new_page()
+            print("[MAIN] Opened fresh browser page")
             print("[MAIN] Connected to browser")
 
             # Log in
@@ -1902,6 +1905,11 @@ async def main():
             )
             raise
         finally:
+            # Close our page to avoid leaving dirty state
+            try:
+                await page.close()
+            except Exception:
+                pass
             print("[MAIN] Disconnecting from browser")
 
 
