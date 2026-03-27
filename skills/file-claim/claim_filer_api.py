@@ -49,7 +49,7 @@ except ImportError:
 # CONFIGURATION
 # ============================================================================
 
-SCRIPT_VERSION = "api-v6-robust-token-capture-2026-03-27"
+SCRIPT_VERSION = "api-v7-tg-from-config-2026-03-27"
 print(f"[INIT] BCBS API Claim Filer {SCRIPT_VERSION} initialized at {datetime.now().isoformat()}")
 
 API_BASE = "https://claimsapire.hthworldwide.com/v4"
@@ -1078,10 +1078,44 @@ def update_sheets(row_number: int, reference_number: str, status: str = "Filed")
 # TELEGRAM NOTIFICATION
 # ============================================================================
 
+def _get_telegram_creds() -> Tuple[str, str]:
+    """
+    Get Telegram bot token and chat ID.
+    Checks env vars first, then falls back to reading the OpenClaw config file.
+    """
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "8409634074")  # Fernanda's chat ID
+
+    if not token:
+        # Try reading from OpenClaw config
+        config_paths = [
+            "/data/.openclaw/openclaw.json",
+            os.path.join(os.environ.get("OPENCLAW_STATE_DIR", ""), "openclaw.json"),
+        ]
+        for path in config_paths:
+            try:
+                with open(path, "r") as f:
+                    config = json.load(f)
+                # Look for Telegram bot token in channels config
+                channels = config.get("channels", {})
+                for ch_name, ch_config in channels.items():
+                    if isinstance(ch_config, dict):
+                        t = ch_config.get("botToken") or ch_config.get("bot_token") or ch_config.get("token")
+                        if t:
+                            token = t
+                            print(f"[TG] Found bot token in OpenClaw config ({path}, channel: {ch_name})")
+                            break
+                if token:
+                    break
+            except (FileNotFoundError, json.JSONDecodeError, KeyError):
+                continue
+
+    return token, chat_id
+
+
 def send_telegram(message: str) -> None:
     """Send a message to Telegram."""
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+    token, chat_id = _get_telegram_creds()
     if not token or not chat_id:
         print(f"[TG] No Telegram credentials, skipping notification")
         return
@@ -1104,8 +1138,7 @@ def ask_telegram_for_2fa() -> Optional[str]:
     """
     import time
 
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+    token, chat_id = _get_telegram_creds()
     if not token or not chat_id:
         print("[TG] No Telegram credentials — cannot ask for 2FA code")
         return None
