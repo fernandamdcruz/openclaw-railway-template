@@ -838,30 +838,32 @@ def read_pending_claims() -> List[Dict[str, Any]]:
     """
     Read pending claims from Google Sheets using gog CLI.
 
-    Actual column layout (confirmed 2026-03-27 via diagnostic logging):
-    - A (0) = Date Processed
-    - B (1) = Patient Name
-    - C (2) = Provider Name
-    - D (3) = Date of Service
-    - E (4) = Amount Billed
-    - F (5) = Currency
-    - G (6) = Diagnosis Codes
-    - H (7) = Procedure Codes
-    - I (8) = Invoice #
-    - J (9) = Year  (NOT city — do not use for location)
-    - K (10) = Claim Status (must be "Pending")
-    - L (11) = Drive File Link
-    - M (12) = Bill Type  (NOT country — do not use for location)
-
-    City and Country are NOT in the spreadsheet — they are derived
-    from the provider name via _enrich_provider_location().
+    Column layout (updated 2026-03-27 — City & Country added after Year):
+    - A (0)  = Date Processed
+    - B (1)  = Patient Name
+    - C (2)  = Provider Name
+    - D (3)  = Date of Service
+    - E (4)  = Amount Billed
+    - F (5)  = Currency
+    - G (6)  = Diagnosis Codes
+    - H (7)  = Procedure Codes
+    - I (8)  = Invoice #
+    - J (9)  = Year
+    - K (10) = City
+    - L (11) = Country
+    - M (12) = Claim Status (must be "Pending")
+    - N (13) = Drive File Link
+    - O (14) = Bill Type
+    - P (15) = Secondary Doc
+    - Q (16) = Claim Ref #
+    - R (17) = Notes
     """
     print("[SHEETS] Reading pending claims from Google Sheets")
 
     claims = []
     try:
         result = subprocess.run(
-            ["gog", "sheets", "get", GOOGLE_SHEET_ID, f"'{GOOGLE_SHEET_TAB}'!A:M", "--json"],
+            ["gog", "sheets", "get", GOOGLE_SHEET_ID, f"'{GOOGLE_SHEET_TAB}'!A:R", "--json"],
             capture_output=True, text=True, timeout=30, env=GOG_ENV
         )
 
@@ -871,10 +873,10 @@ def read_pending_claims() -> List[Dict[str, Any]]:
             rows = data.get("values", data) if isinstance(data, dict) else data
 
             for row_idx, row in enumerate(rows, start=2):  # Row 1 is header
-                # Column K is index 10 (0-indexed)
                 # DEBUG: log raw row to diagnose column mapping issues
-                print(f"[SHEETS] Row {row_idx} raw ({len(row)} cols): {row[:15]}")
-                if len(row) > 10 and row[10] and row[10].strip().lower() == "pending":
+                print(f"[SHEETS] Row {row_idx} raw ({len(row)} cols): {row[:18]}")
+                # Column M (12) = Claim Status
+                if len(row) > 12 and row[12] and row[12].strip().lower() == "pending":
                     claim = {
                         "patient": row[1] if len(row) > 1 else "",
                         "provider": row[2] if len(row) > 2 else "",
@@ -884,15 +886,16 @@ def read_pending_claims() -> List[Dict[str, Any]]:
                         "diagnosis": row[6] if len(row) > 6 else "",
                         "procedure": row[7] if len(row) > 7 else "",
                         "invoice_num": row[8] if len(row) > 8 else "",
-                        "bill_type": row[12] if len(row) > 12 else "",
-                        "drive_link": row[11] if len(row) > 11 else "",
-                        "city": "",      # Always derived from provider
-                        "country": "",   # Always derived from provider
+                        "city": row[10] if len(row) > 10 else "",
+                        "country": row[11] if len(row) > 11 else "",
+                        "drive_link": row[13] if len(row) > 13 else "",
+                        "bill_type": row[14] if len(row) > 14 else "",
                         "row_number": row_idx,
                     }
 
-                    # City/country MUST come from provider mapping, not the sheet
-                    claim = _enrich_provider_location(claim)
+                    # Fall back to provider mapping if city/country not in sheet
+                    if not claim["city"] or not claim["country"]:
+                        claim = _enrich_provider_location(claim)
 
                     # DEBUG: log parsed claim data
                     print(f"[SHEETS] Parsed claim: patient={claim['patient']}, provider={claim['provider']}, "
@@ -947,21 +950,21 @@ def _enrich_provider_location(claim: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def update_sheets(row_number: int, reference_number: str) -> None:
-    """Update Google Sheet: set column K to "Filed" and column M to reference number."""
+    """Update Google Sheet: set column M (Claim Status) to "Filed" and column Q (Claim Ref #) to reference number."""
     print(f"[SHEETS] Updating row {row_number} with reference {reference_number}")
     try:
-        # Update column K (status) to "Filed"
+        # Update column M (Claim Status) to "Filed"
         subprocess.run(
             ["gog", "sheets", "update", GOOGLE_SHEET_ID,
-             f"'{GOOGLE_SHEET_TAB}'!K{row_number}",
+             f"'{GOOGLE_SHEET_TAB}'!M{row_number}",
              "--values-json", json.dumps([["Filed"]]),
              "--input", "USER_ENTERED"],
             timeout=30, check=True, env=GOG_ENV
         )
-        # Update column M (reference number)
+        # Update column Q (Claim Ref #)
         subprocess.run(
             ["gog", "sheets", "update", GOOGLE_SHEET_ID,
-             f"'{GOOGLE_SHEET_TAB}'!M{row_number}",
+             f"'{GOOGLE_SHEET_TAB}'!Q{row_number}",
              "--values-json", json.dumps([[reference_number]]),
              "--input", "USER_ENTERED"],
             timeout=30, check=True, env=GOG_ENV
