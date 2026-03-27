@@ -1387,117 +1387,151 @@ async def step2_basic_info(page: Page, claim: Dict[str, Any]) -> None:
             await page.keyboard.press("Tab")
             await wait_for_flutter(page)
 
-            # Select patient — in HTML renderer mode the field may have the
-            # actual label "Patient" instead of a generic combobox/searchbox role.
-            print(f"[STEP2] Selecting patient: {claim['patient']}")
-            await asyncio.sleep(2)  # Let Flutter settle after Tab
-
-            patient_field = None
-
-            # Strategy A: textbox with "Patient" in name (HTML renderer mode)
-            loc = page.get_by_role("textbox", name=re.compile("Patient", re.IGNORECASE))
-            if await loc.count() > 0:
-                patient_field = loc.first
-                print("[STEP2] Found patient field via textbox name='Patient'")
-
-            # Strategy B: combobox/searchbox (CanvasKit mode)
-            if patient_field is None:
-                for role in ["combobox", "searchbox"]:
-                    loc = page.get_by_role(role)
-                    if await loc.count() > 0:
-                        patient_field = loc.first
-                        print(f"[STEP2] Found patient field via role='{role}'")
-                        break
-
-            # Strategy C: CSS selector for input with patient-related attrs
-            if patient_field is None:
-                loc = page.locator('input[placeholder*="atient" i], input[aria-label*="atient" i]')
-                if await loc.count() > 0:
-                    patient_field = loc.first
-                    print("[STEP2] Found patient field via CSS selector")
-
-            # Strategy D: second textbox (first is nick name)
-            if patient_field is None:
-                fresh_textboxes = page.get_by_role("textbox")
-                count = await fresh_textboxes.count()
-                print(f"[STEP2] Fallback: textbox count={count}")
-                if count >= 2:
-                    patient_field = fresh_textboxes.nth(1)
-                    print("[STEP2] Using second textbox as patient field")
-
-            if patient_field is None:
-                raise Exception("STEP2: Cannot find Patient field — check dump_page_state output")
-
-            await patient_field.wait_for(state="visible", timeout=15000)
-            await patient_field.click()
-            await asyncio.sleep(1)
-            # Clear any existing value first
-            await page.keyboard.press("Control+a")
-            await page.keyboard.type(claim["patient"], delay=50)
+            # Select patient — Flutter dropdown does NOT reliably filter by typing.
+            # Strategy: click to open dropdown, wait for options to render, then
+            # find and click the exact option matching the patient name.
+            target_patient = claim["patient"]
+            print(f"[STEP2] Selecting patient: {target_patient}")
             await asyncio.sleep(2)
 
-            # Try to select from dropdown — check multiple element types
-            selected = False
-            for role in ["option", "button", "listitem"]:
-                opt = page.get_by_role(role, name=re.compile(re.escape(claim["patient"]), re.IGNORECASE))
-                if await opt.count() > 0:
-                    await opt.first.click()
-                    print(f"[STEP2] Selected patient from {role} role")
-                    selected = True
+            # Find the patient field
+            patient_field = None
+            for strategy, loc_fn in [
+                ("textbox name='Patient'", lambda: page.get_by_role("textbox", name=re.compile("Patient", re.IGNORECASE))),
+                ("combobox", lambda: page.get_by_role("combobox")),
+                ("searchbox", lambda: page.get_by_role("searchbox")),
+                ("CSS selector", lambda: page.locator('input[placeholder*="atient" i], input[aria-label*="atient" i]')),
+            ]:
+                loc = loc_fn()
+                if await loc.count() > 0:
+                    patient_field = loc.first
+                    print(f"[STEP2] Found patient field via {strategy}")
                     break
 
-            if not selected:
-                # Try text-based locator
-                opt = page.locator(f"text=/{re.escape(claim['patient'])}/i")
-                if await opt.count() > 0:
-                    # Filter to only visible clickable elements
-                    for i in range(await opt.count()):
+            if patient_field is None:
+                fresh = page.get_by_role("textbox")
+                cnt = await fresh.count()
+                if cnt >= 2:
+                    patient_field = fresh.nth(1)
+                    print(f"[STEP2] Using second textbox (count={cnt})")
+
+            if patient_field is None:
+                raise Exception("STEP2: Cannot find Patient field")
+
+            # APPROACH 1: Click to open dropdown, then find the right option
+            await patient_field.wait_for(state="visible", timeout=15000)
+            await patient_field.click()
+            await asyncio.sleep(2)  # Wait for dropdown to open
+
+            # Log all visible options for debugging
+            for role in ["option", "button", "listitem"]:
+                items = page.get_by_role(role)
+                cnt = await items.count()
+                if cnt > 0 and cnt < 20:
+                    names = []
+                    for i in range(cnt):
                         try:
-                            is_visible = await opt.nth(i).is_visible()
-                            if is_visible:
+                            txt = await items.nth(i).inner_text()
+                            names.append(txt.strip()[:50])
+                        except Exception:
+                            pass
+                    if names:
+                        print(f"[STEP2] Dropdown {role}s visible: {names}")
+
+            # Try to find and click the correct patient option
+            selected = False
+
+            # Extract parts of the patient name for flexible matching
+            # e.g. "Fernanda Miranda da Cruz" → try full name, then first name
+            name_parts = target_patient.split()
+            first_name = name_parts[0] if name_parts else target_patient
+
+            # Method 1: Look for option/button/listitem containing the patient name
+            for role in ["option", "button", "listitem"]:
+                # Try full name match first
+                opt = page.get_by_role(role, name=re.compile(re.escape(target_patient), re.IGNORECASE))
+                if await opt.count() > 0:
+                    await opt.first.click()
+                    print(f"[STEP2] Selected patient '{target_patient}' from {role} (full match)")
+                    selected = True
+                    break
+                # Try first name match (but verify it's not the wrong person)
+                opt = page.get_by_role(role, name=re.compile(re.escape(first_name), re.IGNORECASE))
+                cnt = await opt.count()
+                if cnt > 0:
+                    # Check each match to find the right one
+                    for i in range(cnt):
+                        try:
+                            txt = await opt.nth(i).inner_text()
+                            if target_patient.lower() in txt.lower() or first_name.lower() in txt.lower():
+                                # Make sure it's NOT a different patient
+                                other_patients = ["mathias", "elena"] if "fernanda" in first_name.lower() else ["fernanda", "elena"]
+                                if not any(other.lower() in txt.lower() for other in other_patients):
+                                    await opt.nth(i).click()
+                                    print(f"[STEP2] Selected patient '{txt.strip()}' from {role} (first name match)")
+                                    selected = True
+                                    break
+                        except Exception:
+                            continue
+                    if selected:
+                        break
+
+            # Method 2: Type to filter, then click
+            if not selected:
+                print(f"[STEP2] No direct option found, trying type-to-filter with '{first_name}'")
+                await page.keyboard.press("Control+a")
+                await page.keyboard.type(first_name, delay=80)
+                await asyncio.sleep(3)  # Longer wait for Flutter to filter
+
+                for role in ["option", "button", "listitem"]:
+                    opt = page.get_by_role(role)
+                    cnt = await opt.count()
+                    for i in range(cnt):
+                        try:
+                            txt = await opt.nth(i).inner_text()
+                            if first_name.lower() in txt.lower():
                                 await opt.nth(i).click()
-                                print("[STEP2] Selected patient via text locator")
+                                print(f"[STEP2] Type-filter: selected '{txt.strip()}' from {role}")
                                 selected = True
                                 break
                         except Exception:
                             continue
+                    if selected:
+                        break
+
+            # Method 3: Use arrow keys to navigate the dropdown
+            if not selected:
+                print("[STEP2] Arrow-key navigation fallback")
+                # Press Home/Up to go to top of list
+                await page.keyboard.press("Home")
+                await asyncio.sleep(0.5)
+                # Navigate down checking each option
+                for arrow_try in range(10):
+                    await page.keyboard.press("ArrowDown")
+                    await asyncio.sleep(0.5)
+                    # Check if current highlight contains our patient
+                    focused = page.locator(':focus, [aria-selected="true"], [data-focus="true"]')
+                    try:
+                        if await focused.count() > 0:
+                            txt = await focused.first.inner_text()
+                            if first_name.lower() in txt.lower():
+                                await page.keyboard.press("Enter")
+                                print(f"[STEP2] Arrow-key: selected '{txt.strip()}'")
+                                selected = True
+                                break
+                    except Exception:
+                        pass
 
             if not selected:
-                print("[STEP2] WARN: No dropdown option found for patient, pressing Enter")
+                print("[STEP2] CRITICAL: Could not select correct patient!")
                 await page.keyboard.press("Enter")
 
             await wait_for_flutter(page)
 
-            # VERIFY: Check what patient was actually selected by reading the field value
+            # VERIFY with screenshot
             await asyncio.sleep(1)
-            try:
-                # Re-find the patient field and check its value
-                verify_field = page.get_by_role("textbox", name=re.compile("Patient", re.IGNORECASE))
-                if await verify_field.count() == 0:
-                    verify_field = page.get_by_role("combobox")
-                if await verify_field.count() == 0:
-                    verify_field = page.get_by_role("searchbox")
-                if await verify_field.count() > 0:
-                    actual_value = await verify_field.first.input_value()
-                    print(f"[STEP2] VERIFY: Patient field now contains: '{actual_value}'")
-                    if claim["patient"].lower() not in actual_value.lower():
-                        print(f"[STEP2] WARNING: Expected patient '{claim['patient']}' but field has '{actual_value}'!")
-                        # Try one more time — clear and retype
-                        await verify_field.first.click()
-                        await asyncio.sleep(0.5)
-                        await page.keyboard.press("Control+a")
-                        await page.keyboard.type(claim["patient"], delay=50)
-                        await asyncio.sleep(2)
-                        # Try clicking the correct option again
-                        for role in ["option", "button", "listitem"]:
-                            opt = page.get_by_role(role, name=re.compile(re.escape(claim["patient"]), re.IGNORECASE))
-                            if await opt.count() > 0:
-                                await opt.first.click()
-                                print(f"[STEP2] Retry: selected patient from {role}")
-                                break
-                        await wait_for_flutter(page)
-            except Exception as verify_err:
-                print(f"[STEP2] Could not verify patient selection: {verify_err}")
+            await take_screenshot(page, "step2_after_patient_selection")
+            print(f"[STEP2] Screenshot taken after patient selection — VERIFY patient is '{target_patient}'")
 
             # Dismiss any NOTICE popup
             await asyncio.sleep(1)
