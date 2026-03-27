@@ -49,7 +49,7 @@ except ImportError:
 # CONFIGURATION
 # ============================================================================
 
-SCRIPT_VERSION = "api-v1-2026-03-27"
+SCRIPT_VERSION = "api-v2-hybrid-2026-03-27"
 print(f"[INIT] BCBS API Claim Filer {SCRIPT_VERSION} initialized at {datetime.now().isoformat()}")
 
 API_BASE = "https://claimsapire.hthworldwide.com/v4"
@@ -224,11 +224,157 @@ if gog_config:
 
 
 # ============================================================================
+# OAUTH LOGIN (Playwright-based, only if API requires auth)
+# ============================================================================
+
+async def obtain_oauth_token() -> Optional[str]:
+    """
+    Use Playwright to log in to BCBS via Okta SSO and intercept the OAuth
+    access_token from the /v1/token response. Handles 2FA via Gmail.
+    Returns the Bearer token string, or None on failure.
+    """
+    import asyncio
+
+    username = os.environ.get("BCBS_USERNAME")
+    password = os.environ.get("BCBS_PASSWORD")
+    if not username or not password:
+        print("[AUTH] No BCBS_USERNAME/BCBS_PASSWORD env vars — cannot obtain token")
+        return None
+
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        print("[AUTH] Playwright not installed — cannot obtain token")
+        return None
+
+    # Import 2FA helper from the Playwright script (same directory)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, script_dir)
+    try:
+        from claim_filer import get_2fa_code_from_gmail
+    except ImportError:
+        print("[AUTH] Could not import get_2fa_code_from_gmail — 2FA will fail")
+        get_2fa_code_from_gmail = None
+
+    captured_token = {"value": None}
+
+    async def intercept_token(response):
+        """Capture the access_token from Okta's /v1/token response."""
+        if "/v1/token" in response.url and response.status == 200:
+            try:
+                data = await response.json()
+                token = data.get("access_token")
+                if token:
+                    captured_token["value"] = token
+                    print(f"[AUTH] Captured OAuth token (expires_in={data.get('expires_in')}s)")
+            except Exception as e:
+                print(f"[AUTH] Failed to parse token response: {e}")
+
+    print("[AUTH] Starting Playwright login to obtain OAuth token...")
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
+        context = await browser.new_context(viewport={"width": 1280, "height": 720})
+        page = await context.new_page()
+
+        # Listen for the token response
+        page.on("response", intercept_token)
+
+        try:
+            # Navigate to login
+            portal_url = "https://members.bcbsglobalsolutions.com"
+            print(f"[AUTH] Navigating to {portal_url}")
+            await page.goto(portal_url, wait_until="networkidle", timeout=30000)
+            await asyncio.sleep(5)
+
+            # Click Login button (Flutter landing page)
+            login_btn = page.get_by_role("button", name=re.compile("^login$", re.IGNORECASE))
+            if await login_btn.count() > 0:
+                await login_btn.click()
+                await asyncio.sleep(5)
+                print(f"[AUTH] Redirected to: {page.url}")
+
+            # Fill username
+            username_input = page.locator('input[name="identifier"]')
+            await username_input.wait_for(state="visible", timeout=15000)
+            await username_input.fill(username)
+            print("[AUTH] Username entered")
+
+            # Fill password
+            password_input = page.locator('input[name="credentials.passcode"]')
+            await password_input.wait_for(state="visible", timeout=5000)
+            await password_input.fill(password)
+            print("[AUTH] Password entered")
+
+            # Submit login
+            import time as _time
+            login_epoch = int(_time.time())
+            submit_btn = page.locator('input[type="submit"][value="SIGN IN"]')
+            await submit_btn.click()
+            print(f"[AUTH] SIGN IN clicked (epoch: {login_epoch})")
+            await asyncio.sleep(5)
+
+            # Check for 2FA
+            current_url = page.url
+            page_text = await page.text_content("body") or ""
+
+            if "verification" in page_text.lower() or "code" in page_text.lower() or "factor" in page_text.lower():
+                print("[AUTH] 2FA detected — retrieving code from Gmail")
+
+                if get_2fa_code_from_gmail:
+                    code = get_2fa_code_from_gmail(login_epoch)
+                    if code:
+                        print(f"[AUTH] Got 2FA code: ****{code[-2:]}")
+                        # Find the verification code input
+                        code_input = page.locator('input[name="credentials.passcode"]')
+                        if await code_input.count() == 0:
+                            code_input = page.locator('input[type="tel"]')
+                        if await code_input.count() == 0:
+                            code_input = page.get_by_role("textbox")
+
+                        await code_input.first.fill(code)
+                        verify_btn = page.locator('input[type="submit"]')
+                        await verify_btn.click()
+                        print("[AUTH] 2FA code submitted")
+                        await asyncio.sleep(8)
+                    else:
+                        print("[AUTH] Could not get 2FA code — aborting")
+                        return None
+                else:
+                    print("[AUTH] No 2FA helper available — aborting")
+                    return None
+
+            # Wait for redirect and token capture
+            await asyncio.sleep(5)
+            print(f"[AUTH] Final URL: {page.url}")
+
+            if captured_token["value"]:
+                print("[AUTH] Token obtained successfully")
+                return captured_token["value"]
+            else:
+                print("[AUTH] Token was NOT captured — login may have failed")
+                return None
+
+        except Exception as e:
+            print(f"[AUTH] Login error: {e}")
+            traceback.print_exc()
+            return None
+        finally:
+            await browser.close()
+
+
+# ============================================================================
 # API CLIENT
 # ============================================================================
 
 session = requests.Session()
 session.headers.update(API_HEADERS)
+
+
+def set_auth_token(token: str) -> None:
+    """Set the Bearer token on the session for all subsequent API calls."""
+    session.headers["Authorization"] = f"Bearer {token}"
+    print(f"[API] Authorization header set (token length: {len(token)})")
 
 
 def api_post(endpoint: str, body: dict, base: str = API_BASE) -> dict:
@@ -1027,6 +1173,56 @@ def file_single_claim(claim_data: dict) -> Tuple[bool, str]:
         return (False, f"Error: {str(e)}")
 
 
+def authenticate() -> bool:
+    """
+    Obtain an OAuth token via Playwright login and set it on the API session.
+    Returns True if token was obtained, False otherwise.
+    """
+    import asyncio
+
+    print("[AUTH] API requires authentication — obtaining OAuth token via Playwright login...")
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # If we're already in an async context, create a new loop in a thread
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                token = pool.submit(lambda: asyncio.run(obtain_oauth_token())).result(timeout=120)
+        else:
+            token = loop.run_until_complete(obtain_oauth_token())
+    except RuntimeError:
+        token = asyncio.run(obtain_oauth_token())
+
+    if token:
+        set_auth_token(token)
+        print("[AUTH] Token set — API calls will now include Authorization header")
+        return True
+    else:
+        print("[AUTH] Failed to obtain token")
+        return False
+
+
+def test_api_auth() -> bool:
+    """
+    Quick test: try a lightweight API call to see if auth is needed.
+    Returns True if API works (with or without auth), False if auth is needed but missing.
+    """
+    try:
+        resp = session.get(f"{API_BASE}/claims/metadata/", timeout=10)
+        if resp.status_code == 200:
+            print("[AUTH] API accessible without additional auth")
+            return True
+        elif resp.status_code in (401, 403):
+            print(f"[AUTH] API returned {resp.status_code} — authentication required")
+            return False
+        else:
+            print(f"[AUTH] API returned unexpected status {resp.status_code}")
+            return False
+    except Exception as e:
+        print(f"[AUTH] API test failed: {e}")
+        return False
+
+
 def main():
     """Main entry point: read pending claims from Google Sheets and file them."""
     print(f"\n[MAIN] BCBS API Claim Filer {SCRIPT_VERSION}")
@@ -1036,6 +1232,14 @@ def main():
         print("[MAIN] ERROR: GOOGLE_SHEET_ID not set")
         send_telegram("Claim filing failed: GOOGLE_SHEET_ID not configured")
         return
+
+    # ── Step 0: Check if API needs auth, and if so, login to get token ──
+    if not test_api_auth():
+        if not authenticate():
+            msg = "Claim filing failed: could not obtain BCBS OAuth token. Check BCBS_USERNAME/BCBS_PASSWORD env vars."
+            print(f"[MAIN] {msg}")
+            send_telegram(msg)
+            return
 
     # Read pending claims
     claims = read_pending_claims()
