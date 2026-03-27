@@ -49,7 +49,7 @@ except ImportError:
 # CONFIGURATION
 # ============================================================================
 
-SCRIPT_VERSION = "api-v2-hybrid-2026-03-27"
+SCRIPT_VERSION = "api-v3-fix-2fa-reuse-2026-03-27"
 print(f"[INIT] BCBS API Claim Filer {SCRIPT_VERSION} initialized at {datetime.now().isoformat()}")
 
 API_BASE = "https://claimsapire.hthworldwide.com/v4"

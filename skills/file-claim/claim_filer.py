@@ -53,7 +53,7 @@ SHORT_WAIT = 500  # milliseconds
 SCREENSHOT_DIR = Path("/tmp/bcbs_screenshots")
 SCREENSHOT_DIR.mkdir(exist_ok=True)
 
-SCRIPT_VERSION = "v4-2026-03-27"
+SCRIPT_VERSION = "v5-fix-2fa-reuse-2026-03-27"
 print(f"[INIT] BCBS Claim Filer {SCRIPT_VERSION} initialized at {datetime.now().isoformat()}")
 
 
@@ -585,6 +585,41 @@ def _extract_code_from_response(raw_json: str) -> Optional[str]:
     return None
 
 
+# --- 2FA code reuse prevention ---
+_USED_CODES_FILE = "/tmp/bcbs_2fa_used_codes.txt"
+
+
+def _load_used_codes() -> set:
+    """Load previously used 2FA codes from temp file."""
+    try:
+        with open(_USED_CODES_FILE, "r") as f:
+            return set(line.strip() for line in f if line.strip())
+    except FileNotFoundError:
+        return set()
+
+
+def _mark_code_used(code: str):
+    """Append a code to the used-codes file so it won't be reused."""
+    with open(_USED_CODES_FILE, "a") as f:
+        f.write(f"{code}\n")
+    print(f"[2FA] Marked code ****{code[-2:]} as used")
+
+
+def _try_trash_email(msg_id: str):
+    """Best-effort: trash the verification email so it won't be found again."""
+    try:
+        result = subprocess.run(
+            ["gog", "gmail", "trash", msg_id],
+            capture_output=True, text=True, timeout=10, env=GOG_ENV
+        )
+        if result.returncode == 0:
+            print(f"[2FA] Trashed verification email {msg_id}")
+        else:
+            print(f"[2FA] Could not trash email {msg_id}: {result.stderr[:100]}")
+    except Exception as e:
+        print(f"[2FA] Trash attempt failed (non-critical): {e}")
+
+
 def get_2fa_code_from_gmail(login_epoch: int = 0) -> Optional[str]:
     """
     Retrieve the BCBS 2FA verification code from Gmail.
@@ -598,6 +633,11 @@ def get_2fa_code_from_gmail(login_epoch: int = 0) -> Optional[str]:
     print("[2FA] Retrieving verification code from Gmail")
 
     import time
+
+    # Load previously used codes to prevent reuse across runs
+    used_codes = _load_used_codes()
+    if used_codes:
+        print(f"[2FA] Previously used codes to skip: {['****' + c[-2:] for c in used_codes]}")
 
     # Build the Gmail search query with a time filter
     # Gmail's `after:` operator takes a unix epoch timestamp
@@ -690,11 +730,24 @@ def get_2fa_code_from_gmail(login_epoch: int = 0) -> Optional[str]:
                             for c in codes_in_field:
                                 all_snippet_codes.append((idx, field, c))
             if all_snippet_codes:
-                # Take the LAST code found (from newest email, last in gog output)
-                idx, field, code = all_snippet_codes[-1]
-                print(f"[2FA] Found {len(all_snippet_codes)} code(s) in search snippets, "
-                      f"using last (email[{idx}], field={field}): ****{code[-2:]}")
-                return code
+                # Filter out previously used codes
+                fresh_codes = [(i, f, c) for i, f, c in all_snippet_codes if c not in used_codes]
+                if fresh_codes:
+                    idx, field, code = fresh_codes[-1]
+                    print(f"[2FA] Found {len(all_snippet_codes)} code(s), "
+                          f"{len(fresh_codes)} fresh. Using (email[{idx}], {field}): ****{code[-2:]}")
+                    _mark_code_used(code)
+                    # Try to trash the email so future searches won't find it
+                    if isinstance(emails[idx], dict):
+                        eid = emails[idx].get("messageId") or emails[idx].get("id") or emails[idx].get("threadId")
+                        if eid:
+                            _try_trash_email(str(eid))
+                    return code
+                else:
+                    print(f"[2FA] Found {len(all_snippet_codes)} code(s) but ALL are previously used — waiting for fresh email")
+                    if attempt < 17:
+                        time.sleep(5)
+                    continue
 
             lookup_id = msg_id or thread_id
             if not lookup_id:
@@ -716,7 +769,15 @@ def get_2fa_code_from_gmail(login_epoch: int = 0) -> Optional[str]:
             full_output = get_result.stdout
             code = _extract_code_from_response(full_output)
             if code:
+                if code in used_codes:
+                    print(f"[2FA] Extracted code ****{code[-2:]} but it was already used — waiting for fresh email")
+                    if attempt < 17:
+                        time.sleep(5)
+                    continue
                 print(f"[2FA] Extracted code: ****{code[-2:]}")
+                _mark_code_used(code)
+                if lookup_id:
+                    _try_trash_email(str(lookup_id))
                 return code
 
             if attempt == 0:
@@ -774,9 +835,13 @@ def get_2fa_code_from_gmail(login_epoch: int = 0) -> Optional[str]:
                 code_match = re.search(r'\b(\d{6})\b', body)
                 if code_match:
                     code = code_match.group(1)
-                    print(f"[2FA] Found code via IMAP")
-                    mail.logout()
-                    return code
+                    if code in used_codes:
+                        print(f"[2FA] IMAP found code ****{code[-2:]} but already used — waiting")
+                    else:
+                        print(f"[2FA] Found fresh code via IMAP: ****{code[-2:]}")
+                        _mark_code_used(code)
+                        mail.logout()
+                        return code
 
             print(f"[2FA] IMAP attempt {attempt+1}/18 - waiting for email...")
             import time
