@@ -53,7 +53,8 @@ SHORT_WAIT = 500  # milliseconds
 SCREENSHOT_DIR = Path("/tmp/bcbs_screenshots")
 SCREENSHOT_DIR.mkdir(exist_ok=True)
 
-print(f"[INIT] BCBS Claim Filer initialized at {datetime.now().isoformat()}")
+SCRIPT_VERSION = "v4-2026-03-27"
+print(f"[INIT] BCBS Claim Filer {SCRIPT_VERSION} initialized at {datetime.now().isoformat()}")
 
 
 # ============================================================================
