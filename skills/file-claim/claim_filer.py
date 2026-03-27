@@ -1698,6 +1698,10 @@ async def step4_charges(page: Page, claim: Dict[str, Any]) -> None:
                         await page.keyboard.press("Enter")
             await wait_for_flutter(page)
 
+            # Close provider dropdown overlay before moving on
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.5)
+
             await scroll_form(page)
 
             # 4. City — try textbox with "City" in name first, fall back to "TextField"
@@ -1771,6 +1775,9 @@ async def step4_charges(page: Page, claim: Dict[str, Any]) -> None:
                         else:
                             await page.keyboard.press("Enter")
                     await wait_for_flutter(page)
+                    # Close country dropdown
+                    await page.keyboard.press("Escape")
+                    await asyncio.sleep(0.5)
                 else:
                     print("[STEP4] WARN: Could not find Country of Treatment field")
 
@@ -1845,13 +1852,21 @@ async def step4_charges(page: Page, claim: Dict[str, Any]) -> None:
                     else:
                         await page.keyboard.press("Enter")
                 await wait_for_flutter(page)
+                # Close currency dropdown
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.5)
             else:
                 print("[STEP4] WARN: Could not find Currency field")
 
             await scroll_form(page)
 
+            # Close any lingering dropdown overlays before moving to diagnosis
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.5)
+
             # 8. Condition/Diagnosis — multiple strategies
             print(f"[STEP4] Selecting diagnosis: {claim['diagnosis']}")
+            await dump_page_state(page, "STEP4_PRE_DIAG")
             diag_field = None
 
             # Try textbox with Diagnosis/Condition in name (works in both modes)
@@ -1868,35 +1883,46 @@ async def step4_charges(page: Page, claim: Dict[str, Any]) -> None:
                     diag_field = loc.first
                     print("[STEP4] Found diagnosis via CSS selector")
 
-            # Try combobox (second one, first was Provider)
+            # Try combobox — but ONLY if there are 2+ (first one is Provider)
             if diag_field is None:
                 loc = page.get_by_role("combobox")
                 cnt = await loc.count()
                 if cnt > 1:
                     diag_field = loc.nth(1)
                     print(f"[STEP4] Found diagnosis via combobox.nth(1), count={cnt}")
-                elif cnt == 1:
-                    diag_field = loc.first
-                    print("[STEP4] Found diagnosis via combobox.first (only one)")
+                # DO NOT use combobox.first if cnt==1 — that's the Provider field!
 
-            if diag_field:
-                await diag_field.click()
-            else:
-                print("[STEP4] WARN: No diagnosis field found, using Tab")
-                await page.keyboard.press("Tab")
+            if diag_field is None:
+                print("[STEP4] FATAL: Cannot find Diagnosis field — refusing to type into wrong field")
+                await take_screenshot(page, "step4_no_diagnosis_field")
+                raise Exception("STEP4: Cannot find Diagnosis/Condition field — check dump_page_state output")
+
+            await diag_field.click()
             await asyncio.sleep(1)
             await page.keyboard.type(claim["diagnosis"][:30], delay=50)
             await asyncio.sleep(2)
             opt = page.get_by_role("option", name=re.compile(re.escape(claim["diagnosis"][:20]), re.IGNORECASE))
             if await opt.count() > 0:
                 await opt.first.click()
+                print("[STEP4] Selected diagnosis from option")
             else:
                 opt = page.get_by_role("button", name=re.compile(re.escape(claim["diagnosis"][:20]), re.IGNORECASE))
                 if await opt.count() > 0:
                     await opt.first.click()
+                    print("[STEP4] Selected diagnosis from button")
                 else:
-                    await page.keyboard.press("Enter")
+                    opt = page.get_by_role("listitem").filter(has_text=re.compile(re.escape(claim["diagnosis"][:15]), re.IGNORECASE))
+                    if await opt.count() > 0:
+                        await opt.first.click()
+                        print("[STEP4] Selected diagnosis from listitem")
+                    else:
+                        print("[STEP4] No dropdown match for diagnosis, pressing Enter")
+                        await page.keyboard.press("Enter")
             await wait_for_flutter(page)
+
+            # Close diagnosis dropdown before moving to next field
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.5)
 
             # 9. Service Description — textbox with "Service" in name
             print(f"[STEP4] Selecting service: {claim['procedure']}")
