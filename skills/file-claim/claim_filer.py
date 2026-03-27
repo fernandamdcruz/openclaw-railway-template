@@ -567,8 +567,8 @@ def _extract_code_from_response(raw_json: str) -> Optional[str]:
         data = json.loads(raw_json)
     except (json.JSONDecodeError, ValueError):
         # Not valid JSON — fall back to regex on raw text
-        # but ONLY use the specific verification code pattern
-        match = re.search(r'[Vv]erification\s+code\s*:?\s*(\d{6})', raw_json[-2000:])
+        # but ONLY use the specific verification code pattern (search beginning — newest first)
+        match = re.search(r'[Vv]erification\s+code\s*:?\s*(\d{6})', raw_json[:2000])
         return match.group(1) if match else None
 
     # Try to find messages array in the response
@@ -583,13 +583,13 @@ def _extract_code_from_response(raw_json: str) -> Optional[str]:
             messages = [data]
 
     if not messages or not isinstance(messages, list):
-        # Fall back to regex on last 2000 chars (most recent content)
-        match = re.search(r'[Vv]erification\s+code\s*:?\s*(\d{6})', raw_json[-2000:])
+        # Fall back to regex on first 2000 chars (newest message is first in gog output)
+        match = re.search(r'[Vv]erification\s+code\s*:?\s*(\d{6})', raw_json[:2000])
         return match.group(1) if match else None
 
-    # Get the LAST message (newest in thread)
-    newest = messages[-1]
-    print(f"[2FA] Thread has {len(messages)} message(s), checking newest only")
+    # Get the FIRST message (newest in thread — gog returns newest first)
+    newest = messages[0]
+    print(f"[2FA] Thread has {len(messages)} message(s), checking newest (index 0) only")
 
     # Extract body text from the newest message
     body = ""
@@ -624,10 +624,10 @@ def _extract_code_from_response(raw_json: str) -> Optional[str]:
         if match:
             return match.group(1)
 
-    # Last resort: regex on last 2000 chars of raw JSON
-    # (newest message is typically at the end)
-    print("[2FA] Could not parse message body, trying tail of raw output")
-    match = re.search(r'[Vv]erification\s+code\s*:?\s*(\d{6})', raw_json[-2000:])
+    # Last resort: regex on first 2000 chars of raw JSON
+    # (newest message is typically first in gog output)
+    print("[2FA] Could not parse message body, trying head of raw output")
+    match = re.search(r'[Vv]erification\s+code\s*:?\s*(\d{6})', raw_json[:2000])
     return match.group(1) if match else None
 
 
