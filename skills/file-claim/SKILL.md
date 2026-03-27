@@ -5,51 +5,46 @@
 
 ## What To Do
 
-Run the **API-based** claim filer script. It files claims via direct HTTP requests to the BCBS/GeoBlue API — no browser, no login, no 2FA needed.
+Run the claim filer script. **Run it exactly as shown — do not modify, do not improvise, do not read the source code to "understand" it.**
 
 ```bash
-python3 /data/workspace/skills/file-claim/claim_filer_api.py
+GOOGLE_SHEET_ID=1wU7iuAH7mZdenIKNAyrUFuJkVjZsYjxeL07NzqUwMYk GOOGLE_SHEET_TAB=2026 python3 /data/workspace/skills/file-claim/claim_filer_api.py
 ```
 
-If the API script is not available or fails with a connection error, fall back to the Playwright script:
+The script handles EVERYTHING internally:
+- Reads pending claims from Google Sheets
+- Logs into BCBS via Playwright if needed (handles OAuth + 2FA)
+- **It will message Fernanda on Telegram asking for her 2FA code — wait for the script to handle this, do NOT ask her yourself**
+- Files each claim via API calls
+- Updates the spreadsheet
+- Sends Telegram notifications
 
-```bash
-python3 /data/workspace/skills/file-claim/claim_filer.py
-```
+**YOUR ONLY JOB is to run the command above and relay the output to Fernanda.**
 
-**CRITICAL: As soon as the script finishes (whether it succeeded or failed), IMMEDIATELY message Fernanda with the result.** Do not wait. Do not do anything else first. She is waiting for your reply. Look for the `[SUMMARY]` or `[RESULT]` line at the end of the script output and send that to her, plus a brief summary of what happened.
+## CRITICAL RULES
+
+1. **DO NOT** ask Fernanda for her BCBS password or any credentials. The script reads them from environment variables.
+2. **DO NOT** open a browser yourself. The script manages its own Playwright browser.
+3. **DO NOT** read or modify the Python source code.
+4. **DO NOT** try to "help" the script by running parts of it manually.
+5. **DO NOT** fall back to manual browser automation if the script fails.
 
 ## If The Script Fails
 
-1. **IMMEDIATELY message Fernanda** with the error output.
-2. **STOP.** Do NOT try to fix the script, edit the code, or fall back to manual browser automation.
+1. **IMMEDIATELY message Fernanda** with the FULL error output.
+2. **STOP.** Do NOT try to fix anything.
 3. Wait for Fernanda's instructions.
-
-> **Manual fallback exists** in `MANUAL_FALLBACK.md` (same directory), but **only read it if Fernanda explicitly tells you to continue manually.** Never read it on your own initiative.
-
-## How The API Script Works
-
-The script files claims in 6 API calls (no browser needed):
-1. `POST /v4/claimants/save/` — Create claim + set patient
-2. `POST /v4/insurance/save/` — Set other insurance (none)
-3. `POST /v4/charges/save/` — Add charge (provider, diagnosis, amount, dates)
-4. Upload supporting document to S3 via presigned URL
-5. `POST /v4/paymentaccounts/save/` — Set saved wire payment account
-6. `POST /v4/claims/submit` — Submit with signature
-
-Diagnosis and Service Description are resolved dynamically by fetching the available dropdown options from the API and fuzzy-matching against the spreadsheet data.
 
 ## Provider → Patient Mapping
 
 - CLINICA LIVIDI / Clínica Lividi Med → patient: **Elena Miranda** (never Mathias)
 - Dr. Rohrmoser → can be either **Fernanda** or **Mathias** — always check the Patient Name in column B of the sheet
 
-## Data Reference
-
-### Env vars (set in Railway)
-- `BCBS_USERNAME` / `BCBS_PASSWORD` — portal credentials (only needed for Playwright fallback)
+## Env vars (set in Railway)
+- `BCBS_USERNAME` / `BCBS_PASSWORD` — portal credentials for Playwright login
 - Config home env var set to `/data/workspace/.config` — gog Gmail/Sheets access
 - `GOG_KEYRING_PASSWORD=ferdybot-calendar-2026` — gog keyring
+- `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` — for notifications and 2FA code requests
 
 ### Google Sheets
 - Sheet ID: `1wU7iuAH7mZdenIKNAyrUFuJkVjZsYjxeL07NzqUwMYk`
