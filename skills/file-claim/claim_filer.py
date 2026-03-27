@@ -32,7 +32,9 @@ from typing import Optional, Dict, List, Any
 from playwright.async_api import async_playwright, Page, Browser, BrowserContext
 
 # Configuration
-BCBS_PORTAL_URL = "https://members.bcbsglobalsolutions.com"
+# Force HTML renderer mode — Flutter renders real HTML elements instead of
+# canvas + flt-semantics, making Playwright automation reliable.
+BCBS_PORTAL_URL = "https://members.bcbsglobalsolutions.com/?renderer=html"
 CDP_URL = "http://127.0.0.1:9222"
 GOOGLE_SHEET_ID = "1wU7iuAH7mZdenIKNAyrUFuJkVjZsYjxeL07NzqUwMYk"
 GOOGLE_SHEET_TAB = "2026"
