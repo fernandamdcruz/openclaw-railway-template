@@ -838,19 +838,23 @@ def read_pending_claims() -> List[Dict[str, Any]]:
     """
     Read pending claims from Google Sheets using gog CLI.
 
-    Column mapping:
+    Actual column layout (confirmed 2026-03-27 via diagnostic logging):
+    - A (0) = Date Processed
     - B (1) = Patient Name
     - C (2) = Provider Name
     - D (3) = Date of Service
     - E (4) = Amount Billed
     - F (5) = Currency
     - G (6) = Diagnosis Codes
-    - H (7) = Procedure Code
+    - H (7) = Procedure Codes
     - I (8) = Invoice #
-    - J (9) = City (provider location)
+    - J (9) = Year  (NOT city — do not use for location)
     - K (10) = Claim Status (must be "Pending")
     - L (11) = Drive File Link
-    - M (12) = Country of Treatment
+    - M (12) = Bill Type  (NOT country — do not use for location)
+
+    City and Country are NOT in the spreadsheet — they are derived
+    from the provider name via _enrich_provider_location().
     """
     print("[SHEETS] Reading pending claims from Google Sheets")
 
@@ -880,19 +884,20 @@ def read_pending_claims() -> List[Dict[str, Any]]:
                         "diagnosis": row[6] if len(row) > 6 else "",
                         "procedure": row[7] if len(row) > 7 else "",
                         "invoice_num": row[8] if len(row) > 8 else "",
-                        "city": row[9] if len(row) > 9 else "",
+                        "bill_type": row[12] if len(row) > 12 else "",
                         "drive_link": row[11] if len(row) > 11 else "",
-                        "country": row[12] if len(row) > 12 else "",
+                        "city": "",      # Always derived from provider
+                        "country": "",   # Always derived from provider
                         "row_number": row_idx,
                     }
-                    # DEBUG: log parsed claim data to verify mapping
+
+                    # City/country MUST come from provider mapping, not the sheet
+                    claim = _enrich_provider_location(claim)
+
+                    # DEBUG: log parsed claim data
                     print(f"[SHEETS] Parsed claim: patient={claim['patient']}, provider={claim['provider']}, "
                           f"date={claim['date']}, amount={claim['amount']}, currency={claim['currency']}, "
                           f"city={claim['city']}, country={claim['country']}, invoice={claim['invoice_num']}")
-
-                    # Derive city/country from provider if not in sheet
-                    if not claim["city"] or not claim["country"]:
-                        claim = _enrich_provider_location(claim)
 
                     claims.append(claim)
                     print(f"[SHEETS] Found pending claim: {claim['invoice_num']} - {claim['patient']}")
@@ -913,9 +918,13 @@ def _enrich_provider_location(claim: Dict[str, Any]) -> Dict[str, Any]:
     provider_lower = claim["provider"].lower()
 
     # Known provider → location mappings
+    # Add new providers here as they appear in claims
     provider_locations = {
         "lividi": {"city": "São Paulo", "country": "Brazil"},
         "clinica lividi": {"city": "São Paulo", "country": "Brazil"},
+        "rohrmoser": {"city": "Munich", "country": "Germany"},
+        "dr. rohrmoser": {"city": "Munich", "country": "Germany"},
+        "dr rohrmoser": {"city": "Munich", "country": "Germany"},
     }
 
     for pattern, location in provider_locations.items():
