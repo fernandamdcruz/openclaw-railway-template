@@ -24,6 +24,7 @@ python3 /data/workspace/skills/file-claim/claim_filer.py
 ## Provider → Patient Mapping
 
 - CLINICA LIVIDI / Clínica Lividi Med → patient: **Elena Miranda** (never Mathias)
+- Dr. Rohrmoser → can be either **Fernanda** or **Mathias** — always check the Patient Name in column B of the sheet
 
 ## Data Reference
 

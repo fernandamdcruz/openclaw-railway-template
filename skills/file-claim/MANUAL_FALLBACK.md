@@ -131,7 +131,7 @@ The date picker dialog has a `textbox "mm/dd/yyyy"` with `type="search"` at the 
 **Sheet ID**: `1wU7iuAH7mZdenIKNAyrUFuJkVjZsYjxeL07NzqUwMYk`
 **Tab**: `2026`
 
-Read ALL rows. Only process rows where column K (Claim Status) = "Pending".
+Read ALL rows. Only process rows where column M (Claim Status) = "Pending".
 
 For each pending row, extract:
 | Column | Header | Maps to |
@@ -142,14 +142,17 @@ For each pending row, extract:
 | E | Amount Billed | Wizard Step 4 (Charges): Charge Amount |
 | F | Currency | Wizard Step 4 (Charges): Billed Invoice Currency dropdown |
 | G | Diagnosis Codes | Wizard Step 4 (Charges): Condition or Diagnosis dropdown |
-| H | Procedure Code | Wizard Step 4 (Charges): Service Description dropdown |
+| H | Procedure Codes | Wizard Step 4 (Charges): Service Description dropdown |
 | I | Invoice # | Wizard Step 4 (Charges): Charge Nickname |
-| L | Drive File Link | Supporting Document upload (after charges are saved) |
+| K | City | Wizard Step 4 (Charges): City |
+| L | Country | Wizard Step 4 (Charges): Country of Treatment |
+| N | Drive File Link | Supporting Document upload (after charges are saved) |
 
-If any required field (B, C, D, E, F, L) is blank, **stop and ask Fernanda** before filing.
+If any required field (B, C, D, E, F, K, L) is blank, **stop and ask Fernanda** before filing.
 
 **Provider → Patient mapping** (do NOT mix up):
 - CLINICA LIVIDI / Clínica Lividi Med → patient: **Elena Miranda** (NEVER Mathias)
+- Dr. Rohrmoser → can be either Fernanda or Mathias — check column B
 
 ### Step 1: Login
 
@@ -290,14 +293,14 @@ URL pattern: `.../authorization`
 
 After the claim is filed, upload supporting documents:
 1. Look for a "Documents" or "Upload" section on the confirmation/claim detail page
-2. Download the invoice file from the Drive link in Sheet column L
+2. Download the invoice file from the Drive link in Sheet column N
 3. Upload using the file input (look for hidden `<input type="file">` on the page)
 4. If no upload option is on the confirmation page, navigate to the claim details and look for a document upload area
 
 ### Step 10: Update Google Sheets
 
-1. Update column K (Claim Status) from "Pending" to "Filed"
-2. Add the claim reference number to column M (or next available column)
+1. Update column M (Claim Status) from "Pending" to "Filed"
+2. Add the claim reference number to column Q (Claim Ref #)
 
 ### Step 11: Notify Fernanda
 

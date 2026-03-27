@@ -1468,6 +1468,37 @@ async def step2_basic_info(page: Page, claim: Dict[str, Any]) -> None:
 
             await wait_for_flutter(page)
 
+            # VERIFY: Check what patient was actually selected by reading the field value
+            await asyncio.sleep(1)
+            try:
+                # Re-find the patient field and check its value
+                verify_field = page.get_by_role("textbox", name=re.compile("Patient", re.IGNORECASE))
+                if await verify_field.count() == 0:
+                    verify_field = page.get_by_role("combobox")
+                if await verify_field.count() == 0:
+                    verify_field = page.get_by_role("searchbox")
+                if await verify_field.count() > 0:
+                    actual_value = await verify_field.first.input_value()
+                    print(f"[STEP2] VERIFY: Patient field now contains: '{actual_value}'")
+                    if claim["patient"].lower() not in actual_value.lower():
+                        print(f"[STEP2] WARNING: Expected patient '{claim['patient']}' but field has '{actual_value}'!")
+                        # Try one more time — clear and retype
+                        await verify_field.first.click()
+                        await asyncio.sleep(0.5)
+                        await page.keyboard.press("Control+a")
+                        await page.keyboard.type(claim["patient"], delay=50)
+                        await asyncio.sleep(2)
+                        # Try clicking the correct option again
+                        for role in ["option", "button", "listitem"]:
+                            opt = page.get_by_role(role, name=re.compile(re.escape(claim["patient"]), re.IGNORECASE))
+                            if await opt.count() > 0:
+                                await opt.first.click()
+                                print(f"[STEP2] Retry: selected patient from {role}")
+                                break
+                        await wait_for_flutter(page)
+            except Exception as verify_err:
+                print(f"[STEP2] Could not verify patient selection: {verify_err}")
+
             # Dismiss any NOTICE popup
             await asyncio.sleep(1)
             await dismiss_popups(page)

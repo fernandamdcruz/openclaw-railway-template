@@ -181,25 +181,34 @@ FerdyBot writes rows to this sheet when processing medical invoices. When filing
 | E | Amount Billed | Step 4: Charge Amount | Exact value, no rounding |
 | F | Currency | Step 4: Billed Invoice Currency | BRL = Brazilian Real, EUR = Euro, USD = US Dollar |
 | G | Diagnosis Codes | Step 4: Condition or Diagnosis | CID/ICD codes — search in BCBS dropdown; use OTHER if not found |
-| H | Procedure Code | Step 4: Service Description | Map to closest BCBS dropdown option; use OTHER if not found |
+| H | Procedure Codes | Step 4: Service Description | Map to closest BCBS dropdown option; use OTHER if not found |
 | I | Invoice # | Step 4: Charge Nickname | Use as the charge nickname (e.g. "INV-5202") |
-| J | Year | (metadata only) | |
-| K | Claim Status | (filter + update) | Only process rows where status = "Pending"; update to "Filed" after submission |
-| L | Drive File Link | Step 4: Supporting Document | **Use the original invoice file already in the Telegram chat — no Drive download needed** |
+| J | Year | (metadata only) | Year of service — for reference only |
+| K | City | Step 4: City | City where treatment occurred |
+| L | Country | Step 4: Country of Treatment | Country where treatment occurred |
+| M | Claim Status | (filter + update) | Only process rows where status = "Pending"; update to "Filed" after submission |
+| N | Drive File Link | Step 4: Supporting Document | **Use the original invoice file already in the Telegram chat — no Drive download needed** |
+| O | Bill Type | (metadata only) | "Medical", "Dental", etc. — for reference only |
+| P | Secondary Doc | (optional) | Secondary supporting document if applicable |
+| Q | Claim Ref # | (auto-filled after filing) | BCBS reference number — written by the filing script |
+| R | Notes | (metadata only) | Free text notes |
 
-#### Supporting Document Upload (Column L)
+**When writing new rows to the sheet** (processing incoming medical bills), FerdyBot MUST populate ALL columns A through R. Leave cells blank if the value is unknown — never skip columns or shift data. The column order is critical for the automated claim filing script.
 
-Each row has a Google Drive file link in column L — this is the scanned invoice/receipt that FerdyBot originally received via Telegram and then uploaded to Drive to generate that link. FerdyBot must:
-1. **Use the original file from the Telegram chat** — it's already in context (this is the same file that was used to create the Drive link in column L). No need to download from Drive.
+#### Supporting Document Upload (Column N)
+
+Each row has a Google Drive file link in column N — this is the scanned invoice/receipt that FerdyBot originally received via Telegram and then uploaded to Drive to generate that link. FerdyBot must:
+1. **Use the original file from the Telegram chat** — it's already in context (this is the same file that was used to create the Drive link in column N). No need to download from Drive.
 2. Upload it to the BCBS supporting documents step for that charge
 3. Do NOT use placeholder files — the actual invoice is required for the claim to be processed
 
 #### Provider → Patient Assignment
 
 Providers are tied to specific patients. Do NOT mix them up. Known mappings (confirm against sheet):
-- **CLINICA LIVIDI / Clínica Lividi Med** → patient: **Elena Miranda** (row 7, amount: 1100 BRL, date: 2026-01-21). **Never file under Mathias.**
+- **CLINICA LIVIDI / Clínica Lividi Med** → patient: **Elena Miranda**. **Never file under Mathias.**
+- **Dr. Rohrmoser** → can be either **Fernanda** or **Mathias** — check the Patient Name in column B
 
-If any required field (B, C, D, E, F, L) is blank in the sheet row, **stop and ask** before filing. Do not invent values.
+If any required field (B, C, D, E, F, K, L) is blank in the sheet row, **stop and ask** before filing. Do not invent values.
 
 ### Triggering
 Say "file claim", "file my claims", "submit reimbursement", or similar to FerdyBot in Telegram.
