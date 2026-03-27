@@ -1,0 +1,65 @@
+# Base image with all heavy dependencies pre-installed.
+# Built via GitHub Actions and pushed to ghcr.io/fernandamdcruz/openclaw-base.
+# Rebuild this only when upgrading OpenClaw, Playwright, gog, or system deps.
+#
+# Manual build (if needed):
+#   docker build -f Dockerfile.base -t ghcr.io/fernandamdcruz/openclaw-base:latest \
+#     --build-arg OPENCLAW_INSTALL_BROWSER=1 .
+#   docker push ghcr.io/fernandamdcruz/openclaw-base:latest
+
+FROM node:22-bookworm
+
+ARG OPENCLAW_INSTALL_BROWSER
+
+# System packages
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    gosu \
+    procps \
+    python3 \
+    python3-pip \
+    build-essential \
+    zip \
+    xvfb \
+ && rm -rf /var/lib/apt/lists/*
+
+# Python Playwright for claim_filer.py
+RUN pip install --break-system-packages playwright
+
+# OpenClaw + ClawhHub
+RUN npm install -g openclaw@2026.3.13 clawhub@latest
+
+# Playwright Chromium (if OPENCLAW_INSTALL_BROWSER=1)
+RUN if [ "$OPENCLAW_INSTALL_BROWSER" = "1" ]; then \
+      mkdir -p /home/node/.cache/ms-playwright && \
+      PLAYWRIGHT_BROWSERS_PATH=/home/node/.cache/ms-playwright \
+      node /usr/local/lib/node_modules/openclaw/node_modules/playwright-core/cli.js install --with-deps chromium && \
+      chmod -R 777 /home/node/.cache/ms-playwright; \
+    fi
+
+# Create openclaw user
+RUN useradd -m -s /bin/bash openclaw \
+ && mkdir -p /data && chown openclaw:openclaw /data \
+ && mkdir -p /home/linuxbrew/.linuxbrew && chown -R openclaw:openclaw /home/linuxbrew \
+ && if [ -d /home/node/.cache/ms-playwright ]; then \
+      mkdir -p /home/openclaw/.cache && \
+      cp -a /home/node/.cache/ms-playwright /home/openclaw/.cache/ms-playwright && \
+      chown -R openclaw:openclaw /home/openclaw/.cache; \
+    fi
+
+# Homebrew + gog CLI (slowest part — ~5 min)
+USER openclaw
+RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+RUN /home/linuxbrew/.linuxbrew/bin/brew install gogcli
+
+# Environment
+ENV PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"
+ENV HOMEBREW_PREFIX="/home/linuxbrew/.linuxbrew"
+ENV HOMEBREW_CELLAR="/home/linuxbrew/.linuxbrew/Cellar"
+ENV HOMEBREW_REPOSITORY="/home/linuxbrew/.linuxbrew/Homebrew"
+ENV PLAYWRIGHT_BROWSERS_PATH="/home/openclaw/.cache/ms-playwright"
+
+USER root
