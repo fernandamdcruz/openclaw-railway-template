@@ -71,37 +71,53 @@ async def take_screenshot(page: Page, name: str) -> str:
 
 async def scroll_form(page: Page, amount: int = 500) -> None:
     """
-    Scroll the Flutter form container.
-    The form is inside a scrollable flt-semantics element, NOT the page.
+    Scroll the form container. Supports both CanvasKit (flt-semantics)
+    and HTML renderer (regular scrollable divs) modes.
     """
     await page.evaluate(f"""
         () => {{
-            const els = document.querySelectorAll('flt-semantics');
-            let scrollable = null;
-            for (const el of els) {{
+            // Try flt-semantics first (CanvasKit mode)
+            const flts = document.querySelectorAll('flt-semantics');
+            for (const el of flts) {{
                 if (el.scrollHeight > el.clientHeight + 50 && el.clientHeight > 300) {{
-                    scrollable = el;
+                    el.scrollTop += {amount};
+                    return;
                 }}
             }}
-            if (scrollable) {{
-                scrollable.scrollTop += {amount};
+            // HTML renderer mode: look for any scrollable container
+            const allEls = document.querySelectorAll('div, section, main, form');
+            for (const el of allEls) {{
+                if (el.scrollHeight > el.clientHeight + 50 && el.clientHeight > 300) {{
+                    el.scrollTop += {amount};
+                    return;
+                }}
             }}
+            // Last resort: scroll the page itself
+            window.scrollBy(0, {amount});
         }}
     """)
     await asyncio.sleep(0.3)
 
 
 async def scroll_form_to_top(page: Page) -> None:
-    """Scroll the Flutter form container back to top."""
+    """Scroll the form container back to top. Supports both rendering modes."""
     await page.evaluate("""
         () => {
-            const els = document.querySelectorAll('flt-semantics');
-            for (const el of els) {
+            const flts = document.querySelectorAll('flt-semantics');
+            for (const el of flts) {
                 if (el.scrollHeight > el.clientHeight + 50 && el.clientHeight > 300) {
                     el.scrollTop = 0;
-                    break;
+                    return;
                 }
             }
+            const allEls = document.querySelectorAll('div, section, main, form');
+            for (const el of allEls) {
+                if (el.scrollHeight > el.clientHeight + 50 && el.clientHeight > 300) {
+                    el.scrollTop = 0;
+                    return;
+                }
+            }
+            window.scrollTo(0, 0);
         }
     """)
     await asyncio.sleep(0.3)
@@ -485,16 +501,18 @@ async def dump_page_state(page: Page, label: str) -> None:
         except Exception:
             pass
 
-    # Also try to get accessible names of first few textboxes
+    # Log accessible names of ALL textboxes/comboboxes/searchboxes
     for role in ["textbox", "combobox", "searchbox"]:
         try:
             loc = page.get_by_role(role)
             count = await loc.count()
-            for i in range(min(count, 5)):
+            for i in range(min(count, 20)):
                 try:
                     name = await loc.nth(i).get_attribute("aria-label")
                     tag = await loc.nth(i).evaluate("el => el.tagName")
-                    print(f"[DIAG:{label}] {role}[{i}] tag={tag} aria-label='{name}'")
+                    placeholder = await loc.nth(i).get_attribute("placeholder") or ""
+                    value = await loc.nth(i).input_value() if tag in ("INPUT", "TEXTAREA", "input", "textarea") else ""
+                    print(f"[DIAG:{label}] {role}[{i}] tag={tag} aria-label='{name}' placeholder='{placeholder}' value='{value}'")
                 except Exception:
                     print(f"[DIAG:{label}] {role}[{i}] (could not read attrs)")
         except Exception:
@@ -849,6 +867,8 @@ def read_pending_claims() -> List[Dict[str, Any]]:
 
             for row_idx, row in enumerate(rows, start=2):  # Row 1 is header
                 # Column K is index 10 (0-indexed)
+                # DEBUG: log raw row to diagnose column mapping issues
+                print(f"[SHEETS] Row {row_idx} raw ({len(row)} cols): {row[:15]}")
                 if len(row) > 10 and row[10] and row[10].strip().lower() == "pending":
                     claim = {
                         "patient": row[1] if len(row) > 1 else "",
@@ -864,6 +884,10 @@ def read_pending_claims() -> List[Dict[str, Any]]:
                         "country": row[12] if len(row) > 12 else "",
                         "row_number": row_idx,
                     }
+                    # DEBUG: log parsed claim data to verify mapping
+                    print(f"[SHEETS] Parsed claim: patient={claim['patient']}, provider={claim['provider']}, "
+                          f"date={claim['date']}, amount={claim['amount']}, currency={claim['currency']}, "
+                          f"city={claim['city']}, country={claim['country']}, invoice={claim['invoice_num']}")
 
                     # Derive city/country from provider if not in sheet
                     if not claim["city"] or not claim["country"]:
@@ -1350,57 +1374,86 @@ async def step2_basic_info(page: Page, claim: Dict[str, Any]) -> None:
             await page.keyboard.press("Tab")
             await wait_for_flutter(page)
 
-            # Select patient — Flutter renders it as type="search" which
-            # maps to different ARIA roles depending on the build.
-            # Strategy: Tab from nick name into the patient field, then type.
-            print("[STEP2] Selecting patient")
+            # Select patient — in HTML renderer mode the field may have the
+            # actual label "Patient" instead of a generic combobox/searchbox role.
+            print(f"[STEP2] Selecting patient: {claim['patient']}")
             await asyncio.sleep(2)  # Let Flutter settle after Tab
 
-            # Re-query all interactive fields after the Tab/Flutter redraw
             patient_field = None
-            for role in ["combobox", "searchbox"]:
-                loc = page.get_by_role(role)
+
+            # Strategy A: textbox with "Patient" in name (HTML renderer mode)
+            loc = page.get_by_role("textbox", name=re.compile("Patient", re.IGNORECASE))
+            if await loc.count() > 0:
+                patient_field = loc.first
+                print("[STEP2] Found patient field via textbox name='Patient'")
+
+            # Strategy B: combobox/searchbox (CanvasKit mode)
+            if patient_field is None:
+                for role in ["combobox", "searchbox"]:
+                    loc = page.get_by_role(role)
+                    if await loc.count() > 0:
+                        patient_field = loc.first
+                        print(f"[STEP2] Found patient field via role='{role}'")
+                        break
+
+            # Strategy C: CSS selector for input with patient-related attrs
+            if patient_field is None:
+                loc = page.locator('input[placeholder*="atient" i], input[aria-label*="atient" i]')
                 if await loc.count() > 0:
                     patient_field = loc.first
-                    print(f"[STEP2] Found patient field via role='{role}'")
-                    break
+                    print("[STEP2] Found patient field via CSS selector")
 
+            # Strategy D: second textbox (first is nick name)
             if patient_field is None:
-                # Fall back: re-query textboxes, patient is the 2nd one
                 fresh_textboxes = page.get_by_role("textbox")
                 count = await fresh_textboxes.count()
-                print(f"[STEP2] No combobox/searchbox found. Textbox count={count}")
+                print(f"[STEP2] Fallback: textbox count={count}")
                 if count >= 2:
                     patient_field = fresh_textboxes.nth(1)
-                else:
-                    # Last resort: just Tab forward from nick name
-                    print("[STEP2] Using Tab navigation to reach patient field")
-                    await page.keyboard.press("Tab")
-                    await asyncio.sleep(1)
-                    await page.keyboard.type(claim["patient"], delay=50)
-                    await asyncio.sleep(2)
-                    option = page.get_by_role("button", name=re.compile(re.escape(claim["patient"]), re.IGNORECASE))
-                    if await option.count() > 0:
-                        await option.first.click()
-                    else:
-                        await page.keyboard.press("Enter")
-                    await wait_for_flutter(page)
-                    # Skip the normal patient_field click below
-                    patient_field = "DONE"
+                    print("[STEP2] Using second textbox as patient field")
 
-            if patient_field and patient_field != "DONE":
-                await patient_field.wait_for(state="visible", timeout=15000)
-                await patient_field.click()
-                await asyncio.sleep(1)
-                await page.keyboard.type(claim["patient"], delay=50)
-                await asyncio.sleep(2)
-                # Click the matching option in the dropdown overlay
-                option = page.get_by_role("button", name=re.compile(re.escape(claim["patient"]), re.IGNORECASE))
-                if await option.count() > 0:
-                    await option.first.click()
-                else:
-                    await page.keyboard.press("Enter")
-                await wait_for_flutter(page)
+            if patient_field is None:
+                raise Exception("STEP2: Cannot find Patient field — check dump_page_state output")
+
+            await patient_field.wait_for(state="visible", timeout=15000)
+            await patient_field.click()
+            await asyncio.sleep(1)
+            # Clear any existing value first
+            await page.keyboard.press("Control+a")
+            await page.keyboard.type(claim["patient"], delay=50)
+            await asyncio.sleep(2)
+
+            # Try to select from dropdown — check multiple element types
+            selected = False
+            for role in ["option", "button", "listitem"]:
+                opt = page.get_by_role(role, name=re.compile(re.escape(claim["patient"]), re.IGNORECASE))
+                if await opt.count() > 0:
+                    await opt.first.click()
+                    print(f"[STEP2] Selected patient from {role} role")
+                    selected = True
+                    break
+
+            if not selected:
+                # Try text-based locator
+                opt = page.locator(f"text=/{re.escape(claim['patient'])}/i")
+                if await opt.count() > 0:
+                    # Filter to only visible clickable elements
+                    for i in range(await opt.count()):
+                        try:
+                            is_visible = await opt.nth(i).is_visible()
+                            if is_visible:
+                                await opt.nth(i).click()
+                                print("[STEP2] Selected patient via text locator")
+                                selected = True
+                                break
+                        except Exception:
+                            continue
+
+            if not selected:
+                print("[STEP2] WARN: No dropdown option found for patient, pressing Enter")
+                await page.keyboard.press("Enter")
+
+            await wait_for_flutter(page)
 
             # Dismiss any NOTICE popup
             await asyncio.sleep(1)
@@ -1494,12 +1547,27 @@ async def step4_charges(page: Page, claim: Dict[str, Any]) -> None:
             await scroll_form_to_top(page)
             await asyncio.sleep(0.5)
 
-            # All fields use role-based locators because Flutter only creates
-            # <input> elements AFTER a <flt-semantics> textbox is focused.
+            # ---- CLAIM DATA VALIDATION ----
+            print(f"[STEP4] Claim data: provider={claim['provider']}, city={claim['city']}, "
+                  f"country={claim['country']}, amount={claim['amount']}, currency={claim['currency']}, "
+                  f"date={claim['date']}, diagnosis={claim['diagnosis']}, procedure={claim['procedure']}")
+
+            # Sanity check: city should not be a year, country should not be a medical term
+            if claim.get("city") and re.match(r'^\d{4}$', claim["city"].strip()):
+                print(f"[STEP4] WARNING: city='{claim['city']}' looks like a year — possible column mapping error!")
+            if claim.get("country") and claim["country"].strip().lower() in ("medical", "dental", "surgical", "pharmacy"):
+                print(f"[STEP4] WARNING: country='{claim['country']}' looks like a category — possible column mapping error!")
+
+            # ---- FIELD FILLING ----
+            # In HTML renderer mode (?renderer=html), Flutter creates real <input> elements
+            # with actual labels. In CanvasKit mode, it uses flt-semantics with ARIA roles.
+            # We try both naming conventions.
 
             # 1. Charge Nickname — first textbox, pre-filled "CHG 1 DD-MMM-YYYY"
             print("[STEP4] Filling Charge Nickname")
             all_textboxes = page.get_by_role("textbox")
+            tb_count = await all_textboxes.count()
+            print(f"[STEP4] Total textboxes on page: {tb_count}")
             await all_textboxes.first.wait_for(state="visible", timeout=15000)
             await all_textboxes.first.click()
             await asyncio.sleep(1)
@@ -1512,142 +1580,249 @@ async def step4_charges(page: Page, claim: Dict[str, Any]) -> None:
             # 2. Doctor/Dentist radio — pre-selected, leave it
             print("[STEP4] Doctor/Dentist radio pre-selected, skipping")
 
-            # 3. Select Provider — could be combobox, searchbox, or textbox
-            #    with name containing "Provider"
+            # 3. Select Provider — multiple strategies for both rendering modes
             print(f"[STEP4] Selecting provider: {claim['provider']}")
             provider_field = None
 
-            # Debug: log what roles are present
-            for role in ["combobox", "searchbox"]:
-                cnt = await page.get_by_role(role).count()
-                print(f"[STEP4] DEBUG role='{role}' count={cnt}")
-
-            # Try combobox first
-            loc = page.get_by_role("combobox")
-            if await loc.count() > 0:
+            # Strategy A: textbox with "Provider" in the accessible name (HTML mode)
+            loc = page.get_by_role("textbox", name=re.compile("Provider", re.IGNORECASE))
+            cnt = await loc.count()
+            if cnt > 0:
                 provider_field = loc.first
-                print("[STEP4] Found provider via role='combobox'")
+                print(f"[STEP4] Found provider via textbox name='Provider' (count={cnt})")
 
-            # Try searchbox
+            # Strategy B: combobox (CanvasKit mode)
+            if provider_field is None:
+                loc = page.get_by_role("combobox")
+                cnt = await loc.count()
+                if cnt > 0:
+                    provider_field = loc.first
+                    print(f"[STEP4] Found provider via combobox (count={cnt})")
+
+            # Strategy C: searchbox
             if provider_field is None:
                 loc = page.get_by_role("searchbox")
-                if await loc.count() > 0:
+                cnt = await loc.count()
+                if cnt > 0:
                     provider_field = loc.first
-                    print("[STEP4] Found provider via role='searchbox'")
+                    print(f"[STEP4] Found provider via searchbox (count={cnt})")
 
-            # Try textbox with "Provider" in the name
+            # Strategy D: input with placeholder containing "provider" (HTML mode)
             if provider_field is None:
-                loc = page.get_by_role("textbox", name=re.compile("Provider", re.IGNORECASE))
-                if await loc.count() > 0:
+                loc = page.locator('input[placeholder*="rovider" i], input[aria-label*="rovider" i]')
+                cnt = await loc.count()
+                if cnt > 0:
                     provider_field = loc.first
-                    print("[STEP4] Found provider via textbox name='Provider'")
+                    print(f"[STEP4] Found provider via CSS selector (count={cnt})")
 
-            # Fall back to second textbox (first is charge nickname)
+            # Strategy E: second textbox (first is charge nickname)
             if provider_field is None:
                 fresh = page.get_by_role("textbox")
                 cnt = await fresh.count()
-                print(f"[STEP4] Fallback: total textboxes={cnt}")
+                print(f"[STEP4] Provider fallback: total textboxes={cnt}")
                 if cnt >= 2:
                     provider_field = fresh.nth(1)
-                    print("[STEP4] Using second textbox as provider")
+                    print("[STEP4] Using second textbox as provider field")
 
             if provider_field is None:
-                # Last resort: Tab from charge nickname
-                print("[STEP4] Last resort: Tab navigation to provider")
-                await page.keyboard.press("Tab")
-                await asyncio.sleep(1)
-                await page.keyboard.press("Tab")  # skip radio
-                await asyncio.sleep(1)
+                raise Exception("STEP4: Cannot find Provider field — check dump_page_state output")
 
-            if provider_field:
-                await provider_field.wait_for(state="visible", timeout=15000)
-                await provider_field.click()
-                await asyncio.sleep(1)
-
+            await provider_field.wait_for(state="visible", timeout=15000)
+            await provider_field.click()
+            await asyncio.sleep(1)
             await page.keyboard.type(claim["provider"][:20], delay=50)
             await asyncio.sleep(2)
-            option = page.get_by_role("button", name=re.compile(re.escape(claim["provider"][:20]), re.IGNORECASE))
+
+            # Try to select from dropdown
+            option = page.get_by_role("option", name=re.compile(re.escape(claim["provider"][:15]), re.IGNORECASE))
             if await option.count() > 0:
                 await option.first.click()
+                print("[STEP4] Selected provider from option role")
             else:
-                await page.keyboard.press("Enter")
+                option = page.get_by_role("button", name=re.compile(re.escape(claim["provider"][:15]), re.IGNORECASE))
+                if await option.count() > 0:
+                    await option.first.click()
+                    print("[STEP4] Selected provider from button role")
+                else:
+                    # Try listitem
+                    option = page.get_by_role("listitem").filter(has_text=re.compile(re.escape(claim["provider"][:15]), re.IGNORECASE))
+                    if await option.count() > 0:
+                        await option.first.click()
+                        print("[STEP4] Selected provider from listitem")
+                    else:
+                        print("[STEP4] No dropdown option found for provider, pressing Enter")
+                        await page.keyboard.press("Enter")
             await wait_for_flutter(page)
 
             await scroll_form(page)
 
-            # 4. City — textbox with accessible name containing "TextField"
+            # 4. City — try textbox with "City" in name first, fall back to "TextField"
             if claim.get("city"):
                 print(f"[STEP4] Filling city: {claim['city']}")
-                city_field = page.get_by_role("textbox", name=re.compile("TextField", re.IGNORECASE))
-                if await city_field.count() > 0:
-                    await city_field.first.click()
+                city_field = None
+
+                # HTML mode: field labeled "City"
+                loc = page.get_by_role("textbox", name=re.compile(r"\bCity\b", re.IGNORECASE))
+                if await loc.count() > 0:
+                    city_field = loc.first
+                    print("[STEP4] Found city via textbox name='City'")
+
+                # HTML mode: input with placeholder/label "City"
+                if city_field is None:
+                    loc = page.locator('input[placeholder*="ity" i], input[aria-label*="ity" i]')
+                    cnt = await loc.count()
+                    if cnt > 0:
+                        city_field = loc.first
+                        print(f"[STEP4] Found city via CSS selector (count={cnt})")
+
+                # CanvasKit mode: "TextField" — but only if it's the FIRST "TextField" textbox
+                if city_field is None:
+                    loc = page.get_by_role("textbox", name=re.compile("TextField", re.IGNORECASE))
+                    if await loc.count() > 0:
+                        city_field = loc.first
+                        print("[STEP4] Found city via textbox name='TextField' (CanvasKit mode)")
+
+                if city_field:
+                    await city_field.click()
                     await asyncio.sleep(1)
                     await page.keyboard.press("Control+a")
                     await page.keyboard.type(claim["city"], delay=30)
                     await page.keyboard.press("Tab")
                     await wait_for_flutter(page)
+                else:
+                    print("[STEP4] WARN: Could not find City field")
 
-            # 5. Country of Treatment — textbox with "Country of Treatment" in name
+            # 5. Country of Treatment — try multiple name patterns
             if claim.get("country"):
                 print(f"[STEP4] Selecting country: {claim['country']}")
-                country_field = page.get_by_role("textbox", name=re.compile("Country of Treatment", re.IGNORECASE))
-                if await country_field.count() > 0:
-                    await country_field.first.click()
+                country_field = None
+
+                # Try "Country" in name (covers both modes)
+                loc = page.get_by_role("textbox", name=re.compile("Country", re.IGNORECASE))
+                if await loc.count() > 0:
+                    country_field = loc.first
+                    print("[STEP4] Found country via textbox name='Country'")
+
+                # CSS fallback
+                if country_field is None:
+                    loc = page.locator('input[placeholder*="ountry" i], input[aria-label*="ountry" i]')
+                    if await loc.count() > 0:
+                        country_field = loc.first
+                        print("[STEP4] Found country via CSS selector")
+
+                if country_field:
+                    await country_field.click()
                     await asyncio.sleep(1)
                     await page.keyboard.press("Control+a")
                     await page.keyboard.type(claim["country"], delay=50)
                     await asyncio.sleep(1)
-                    opt = page.get_by_role("button", name=re.compile(re.escape(claim["country"]), re.IGNORECASE))
+                    # Try to select from dropdown
+                    opt = page.get_by_role("option", name=re.compile(re.escape(claim["country"]), re.IGNORECASE))
                     if await opt.count() > 0:
                         await opt.first.click()
                     else:
-                        await page.keyboard.press("Enter")
+                        opt = page.get_by_role("button", name=re.compile(re.escape(claim["country"]), re.IGNORECASE))
+                        if await opt.count() > 0:
+                            await opt.first.click()
+                        else:
+                            await page.keyboard.press("Enter")
                     await wait_for_flutter(page)
+                else:
+                    print("[STEP4] WARN: Could not find Country of Treatment field")
 
             await scroll_form(page)
 
-            # 6. Charge Amount — second textbox with "TextField" in name
-            # (first was City, second is Amount)
+            # 6. Charge Amount — try textbox with amount/charge in name, fall back to TextField
             print(f"[STEP4] Filling charge amount: {claim['amount']}")
-            textfields = page.get_by_role("textbox", name=re.compile("TextField", re.IGNORECASE))
-            if await textfields.count() > 1:
-                await textfields.nth(1).click()
-            else:
-                await textfields.first.click()
-            await asyncio.sleep(1)
-            await page.keyboard.press("Control+a")
-            await page.keyboard.type(claim["amount"], delay=30)
-            await page.keyboard.press("Tab")
-            await wait_for_flutter(page)
+            amount_field = None
 
-            # 7. Billed Invoice Currency — textbox with "Billed Invoice Currency" in name
+            # HTML mode: field labeled with "amount" or "charge"
+            loc = page.get_by_role("textbox", name=re.compile("amount|charge", re.IGNORECASE))
+            if await loc.count() > 0:
+                amount_field = loc.first
+                print("[STEP4] Found amount via textbox name")
+
+            # CSS fallback for amount
+            if amount_field is None:
+                loc = page.locator('input[placeholder*="mount" i], input[aria-label*="mount" i]')
+                if await loc.count() > 0:
+                    amount_field = loc.first
+                    print("[STEP4] Found amount via CSS selector")
+
+            # CanvasKit mode: second "TextField" textbox
+            if amount_field is None:
+                textfields = page.get_by_role("textbox", name=re.compile("TextField", re.IGNORECASE))
+                cnt = await textfields.count()
+                if cnt > 1:
+                    amount_field = textfields.nth(1)
+                    print(f"[STEP4] Found amount via TextField.nth(1), count={cnt}")
+                elif cnt > 0:
+                    amount_field = textfields.first
+                    print("[STEP4] Found amount via TextField.first (only one left)")
+
+            if amount_field:
+                await amount_field.click()
+                await asyncio.sleep(1)
+                await page.keyboard.press("Control+a")
+                await page.keyboard.type(claim["amount"], delay=30)
+                await page.keyboard.press("Tab")
+                await wait_for_flutter(page)
+            else:
+                print("[STEP4] WARN: Could not find Charge Amount field")
+
+            # 7. Billed Invoice Currency — try multiple name patterns
             print(f"[STEP4] Selecting currency: {claim['currency']}")
-            currency_field = page.get_by_role("textbox", name=re.compile("Billed Invoice Currency", re.IGNORECASE))
-            if await currency_field.count() > 0:
-                await currency_field.first.click()
+            currency_field = None
+
+            loc = page.get_by_role("textbox", name=re.compile("Currency|Billed Invoice", re.IGNORECASE))
+            if await loc.count() > 0:
+                currency_field = loc.first
+                print("[STEP4] Found currency via textbox name")
+
+            if currency_field is None:
+                loc = page.locator('input[placeholder*="urrency" i], input[aria-label*="urrency" i]')
+                if await loc.count() > 0:
+                    currency_field = loc.first
+                    print("[STEP4] Found currency via CSS selector")
+
+            if currency_field:
+                await currency_field.click()
                 await asyncio.sleep(1)
                 await page.keyboard.press("Control+a")
                 await page.keyboard.type(claim["currency"], delay=50)
                 await asyncio.sleep(1)
-                opt = page.get_by_role("button", name=re.compile(re.escape(claim["currency"]), re.IGNORECASE))
+                opt = page.get_by_role("option", name=re.compile(re.escape(claim["currency"]), re.IGNORECASE))
                 if await opt.count() > 0:
                     await opt.first.click()
                 else:
-                    await page.keyboard.press("Enter")
+                    opt = page.get_by_role("button", name=re.compile(re.escape(claim["currency"]), re.IGNORECASE))
+                    if await opt.count() > 0:
+                        await opt.first.click()
+                    else:
+                        await page.keyboard.press("Enter")
                 await wait_for_flutter(page)
+            else:
+                print("[STEP4] WARN: Could not find Currency field")
 
             await scroll_form(page)
 
-            # 8. Condition/Diagnosis — try combobox, searchbox, or textbox
-            #    with "Diagnosis" or "Condition" in the name
+            # 8. Condition/Diagnosis — multiple strategies
             print(f"[STEP4] Selecting diagnosis: {claim['diagnosis']}")
             diag_field = None
 
-            # Try textbox with Diagnosis/Condition in name first (most specific)
+            # Try textbox with Diagnosis/Condition in name (works in both modes)
             loc = page.get_by_role("textbox", name=re.compile("Diagnosis|Condition", re.IGNORECASE))
             if await loc.count() > 0:
                 diag_field = loc.first
                 print("[STEP4] Found diagnosis via textbox name")
+
+            # CSS fallback
+            if diag_field is None:
+                loc = page.locator('input[placeholder*="iagnosis" i], input[aria-label*="iagnosis" i], '
+                                   'input[placeholder*="ondition" i], input[aria-label*="ondition" i]')
+                if await loc.count() > 0:
+                    diag_field = loc.first
+                    print("[STEP4] Found diagnosis via CSS selector")
 
             # Try combobox (second one, first was Provider)
             if diag_field is None:
@@ -1660,14 +1835,6 @@ async def step4_charges(page: Page, claim: Dict[str, Any]) -> None:
                     diag_field = loc.first
                     print("[STEP4] Found diagnosis via combobox.first (only one)")
 
-            # Try searchbox
-            if diag_field is None:
-                loc = page.get_by_role("searchbox")
-                cnt = await loc.count()
-                if cnt > 0:
-                    diag_field = loc.nth(min(1, cnt - 1))
-                    print(f"[STEP4] Found diagnosis via searchbox, count={cnt}")
-
             if diag_field:
                 await diag_field.click()
             else:
@@ -1676,28 +1843,50 @@ async def step4_charges(page: Page, claim: Dict[str, Any]) -> None:
             await asyncio.sleep(1)
             await page.keyboard.type(claim["diagnosis"][:30], delay=50)
             await asyncio.sleep(2)
-            opt = page.get_by_role("button", name=re.compile(re.escape(claim["diagnosis"][:20]), re.IGNORECASE))
+            opt = page.get_by_role("option", name=re.compile(re.escape(claim["diagnosis"][:20]), re.IGNORECASE))
             if await opt.count() > 0:
                 await opt.first.click()
             else:
-                await page.keyboard.press("Enter")
-            await wait_for_flutter(page)
-
-            # 9. Service Description — textbox with "Service Description" in name
-            print(f"[STEP4] Selecting service: {claim['procedure']}")
-            service_field = page.get_by_role("textbox", name=re.compile("Service Description", re.IGNORECASE))
-            if await service_field.count() > 0:
-                await service_field.first.click()
-                await asyncio.sleep(1)
-                await page.keyboard.press("Control+a")
-                await page.keyboard.type(claim["procedure"][:30], delay=50)
-                await asyncio.sleep(1)
-                opt = page.get_by_role("button", name=re.compile(re.escape(claim["procedure"][:20]), re.IGNORECASE))
+                opt = page.get_by_role("button", name=re.compile(re.escape(claim["diagnosis"][:20]), re.IGNORECASE))
                 if await opt.count() > 0:
                     await opt.first.click()
                 else:
                     await page.keyboard.press("Enter")
+            await wait_for_flutter(page)
+
+            # 9. Service Description — textbox with "Service" in name
+            print(f"[STEP4] Selecting service: {claim['procedure']}")
+            service_field = None
+
+            loc = page.get_by_role("textbox", name=re.compile("Service", re.IGNORECASE))
+            if await loc.count() > 0:
+                service_field = loc.first
+                print("[STEP4] Found service via textbox name")
+
+            if service_field is None:
+                loc = page.locator('input[placeholder*="ervice" i], input[aria-label*="ervice" i]')
+                if await loc.count() > 0:
+                    service_field = loc.first
+                    print("[STEP4] Found service via CSS selector")
+
+            if service_field:
+                await service_field.click()
+                await asyncio.sleep(1)
+                await page.keyboard.press("Control+a")
+                await page.keyboard.type(claim["procedure"][:30], delay=50)
+                await asyncio.sleep(1)
+                opt = page.get_by_role("option", name=re.compile(re.escape(claim["procedure"][:20]), re.IGNORECASE))
+                if await opt.count() > 0:
+                    await opt.first.click()
+                else:
+                    opt = page.get_by_role("button", name=re.compile(re.escape(claim["procedure"][:20]), re.IGNORECASE))
+                    if await opt.count() > 0:
+                        await opt.first.click()
+                    else:
+                        await page.keyboard.press("Enter")
                 await wait_for_flutter(page)
+            else:
+                print("[STEP4] WARN: Could not find Service Description field")
 
             await scroll_form(page)
 
