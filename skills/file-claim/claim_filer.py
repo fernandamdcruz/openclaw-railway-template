@@ -532,6 +532,84 @@ async def close_popup(page: Page) -> None:
 # 2FA — EMAIL CODE RETRIEVAL
 # ============================================================================
 
+def _extract_code_from_response(raw_json: str) -> Optional[str]:
+    """
+    Parse gog gmail get JSON response and extract the 2FA code from
+    the NEWEST message only.
+
+    gog gmail get returns a thread with multiple messages. We need to:
+    1. Parse the JSON to find individual messages
+    2. Get the last/newest message
+    3. Extract the 6-digit code from that message only
+    """
+    try:
+        data = json.loads(raw_json)
+    except (json.JSONDecodeError, ValueError):
+        # Not valid JSON — fall back to regex on raw text
+        # but ONLY use the specific verification code pattern
+        match = re.search(r'[Vv]erification\s+code\s*:?\s*(\d{6})', raw_json[-2000:])
+        return match.group(1) if match else None
+
+    # Try to find messages array in the response
+    messages = None
+    if isinstance(data, list):
+        messages = data
+    elif isinstance(data, dict):
+        messages = (data.get("messages") or data.get("payload")
+                    or data.get("emails") or data.get("results"))
+        if messages is None:
+            # Maybe it's a single message, not a thread
+            messages = [data]
+
+    if not messages or not isinstance(messages, list):
+        # Fall back to regex on last 2000 chars (most recent content)
+        match = re.search(r'[Vv]erification\s+code\s*:?\s*(\d{6})', raw_json[-2000:])
+        return match.group(1) if match else None
+
+    # Get the LAST message (newest in thread)
+    newest = messages[-1]
+    print(f"[2FA] Thread has {len(messages)} message(s), checking newest only")
+
+    # Extract body text from the newest message
+    body = ""
+    if isinstance(newest, dict):
+        # Try various field names gog might use
+        for field in ["body", "text", "content", "snippet", "bodyText",
+                       "plain", "html", "raw"]:
+            val = newest.get(field, "")
+            if val and isinstance(val, str):
+                body += val + "\n"
+        # Also check nested payload structure (Gmail API format)
+        payload = newest.get("payload", {})
+        if isinstance(payload, dict):
+            for part in payload.get("parts", []):
+                if isinstance(part, dict):
+                    part_body = part.get("body", {})
+                    if isinstance(part_body, dict):
+                        body += part_body.get("data", "") + "\n"
+            body_data = payload.get("body", {})
+            if isinstance(body_data, dict):
+                body += body_data.get("data", "") + "\n"
+    elif isinstance(newest, str):
+        body = newest
+
+    if body:
+        print(f"[2FA] Newest message body (first 200 chars): {body[:200]}")
+        match = re.search(r'[Vv]erification\s+code\s*:?\s*(\d{6})', body)
+        if match:
+            return match.group(1)
+        # Fallback: any 6-digit number in the newest message body only
+        match = re.search(r'\b(\d{6})\b', body)
+        if match:
+            return match.group(1)
+
+    # Last resort: regex on last 2000 chars of raw JSON
+    # (newest message is typically at the end)
+    print("[2FA] Could not parse message body, trying tail of raw output")
+    match = re.search(r'[Vv]erification\s+code\s*:?\s*(\d{6})', raw_json[-2000:])
+    return match.group(1) if match else None
+
+
 def get_2fa_code_from_gmail(login_epoch: int = 0) -> Optional[str]:
     """
     Retrieve the BCBS 2FA verification code from Gmail.
@@ -564,12 +642,15 @@ def get_2fa_code_from_gmail(login_epoch: int = 0) -> Optional[str]:
 
     for attempt in range(18):  # 18 attempts × 5s = 90s
         try:
-            # STEP 1: Search for the 2FA email (returns metadata only)
+            # STEP 1: Search for the 2FA email
+            # Add -in:trash -in:spam to exclude deleted/spam emails
+            full_query = f"{search_query} -in:trash -in:spam"
             result = subprocess.run(
-                ["gog", "gmail", "search", search_query, "--max", "1", "--json"],
+                ["gog", "gmail", "search", full_query, "--max", "3", "--json"],
                 capture_output=True, text=True, timeout=15, env=GOG_ENV
             )
             if attempt == 0:
+                print(f"[2FA] search query: {full_query}")
                 print(f"[2FA] search exit code: {result.returncode}")
                 print(f"[2FA] search stdout (first 500 chars): {result.stdout[:500]}")
 
@@ -601,52 +682,64 @@ def get_2fa_code_from_gmail(login_epoch: int = 0) -> Optional[str]:
                     time.sleep(5)
                 continue
 
-            # STEP 2: Get the thread/message ID from search results
+            # STEP 2: Try to get the message ID (not thread ID) for precise retrieval
             first = emails[0]
+            msg_id = None
             thread_id = None
             if isinstance(first, dict):
+                # Prefer messageId over threadId to get a single message
+                msg_id = (first.get("messageId") or first.get("message_id"))
                 thread_id = (first.get("threadId") or first.get("thread_id")
-                             or first.get("id") or first.get("messageId")
-                             or first.get("message_id"))
+                             or first.get("id"))
+                # Log all available keys for debugging
+                if attempt == 0:
+                    print(f"[2FA] First result keys: {list(first.keys())}")
+                    print(f"[2FA] msg_id={msg_id}, thread_id={thread_id}")
+                    # Log snippet if available (may contain the code directly)
+                    snippet = first.get("snippet", first.get("body", ""))
+                    if snippet:
+                        print(f"[2FA] Snippet: {str(snippet)[:200]}")
             elif isinstance(first, str):
                 thread_id = first
 
-            if attempt == 0:
-                print(f"[2FA] First result keys: {list(first.keys()) if isinstance(first, dict) else type(first)}")
-                print(f"[2FA] Extracted thread_id: {thread_id}")
+            # STEP 2b: Try extracting code directly from search result snippet
+            # Some gog versions include a snippet/body in search results
+            if isinstance(first, dict):
+                for field in ["snippet", "body", "text", "content", "subject"]:
+                    val = first.get(field, "")
+                    if val:
+                        code_match = re.search(
+                            r'[Vv]erification\s+code\s*:?\s*(\d{6})', str(val))
+                        if code_match:
+                            code = code_match.group(1)
+                            print(f"[2FA] Found code in search snippet (field={field}): ****{code[-2:]}")
+                            return code
 
-            if not thread_id:
-                print(f"[2FA] Could not extract thread/message ID from search result")
+            lookup_id = msg_id or thread_id
+            if not lookup_id:
+                print(f"[2FA] Could not extract message/thread ID from search result")
                 if attempt < 17:
                     time.sleep(5)
                 continue
 
-            # STEP 3: Fetch the full email body via gog gmail get
+            # STEP 3: Fetch the email — try message first, fall back to thread
             get_result = subprocess.run(
-                ["gog", "gmail", "get", thread_id, "--json"],
+                ["gog", "gmail", "get", lookup_id, "--json"],
                 capture_output=True, text=True, timeout=15, env=GOG_ENV
             )
             if attempt == 0:
-                print(f"[2FA] get exit code: {get_result.returncode}")
+                print(f"[2FA] get (id={lookup_id}) exit code: {get_result.returncode}")
                 print(f"[2FA] get stdout (first 500 chars): {get_result.stdout[:500]}")
 
-            # Search the full get output for 6-digit codes
-            # The thread may contain multiple messages with old codes.
-            # We need the LAST (most recent) code, not the first.
+            # STEP 4: Parse the JSON response to find the newest message body
             full_output = get_result.stdout
-            all_codes = re.findall(
-                r'[Vv]erification\s+code\s*:?\s*(\d{6})', full_output)
-            if not all_codes:
-                all_codes = re.findall(r'\b(\d{6})\b', full_output)
-            if all_codes:
-                code = all_codes[-1]  # Last = most recent message in thread
-                print(f"[2FA] Found {len(all_codes)} code(s) in thread, using latest: {'*' * 4}{code[-2:]}")
-                if len(all_codes) > 1:
-                    print(f"[2FA] All codes found (oldest→newest): {['****' + c[-2:] for c in all_codes]}")
+            code = _extract_code_from_response(full_output)
+            if code:
+                print(f"[2FA] Extracted code: ****{code[-2:]}")
                 return code
 
             if attempt == 0:
-                print(f"[2FA] gog get returned data but no 6-digit code found")
+                print(f"[2FA] Could not extract code from response")
 
         except FileNotFoundError:
             print("[2FA] gog CLI not found, trying IMAP")
