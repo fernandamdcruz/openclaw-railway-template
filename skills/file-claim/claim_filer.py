@@ -1079,6 +1079,15 @@ async def login(page: Page) -> None:
             print(f"[AUTH] After forced nav: {page.url}")
             await take_screenshot(page, "forced_nav_to_portal")
 
+        # CRITICAL: After SSO redirect, the ?renderer=html parameter is lost.
+        # Re-navigate to force HTML renderer mode for the dashboard.
+        print(f"[AUTH] Post-login URL: {page.url}")
+        if "renderer=html" not in page.url:
+            print("[AUTH] HTML renderer lost after SSO redirect — re-navigating")
+            await page.goto(BCBS_PORTAL_URL, wait_until="networkidle")
+            await asyncio.sleep(5)
+            print(f"[AUTH] Re-navigated to: {page.url}")
+
         # Wait for Flutter to fully load the dashboard
         await asyncio.sleep(5)
         await wait_for_flutter(page)
