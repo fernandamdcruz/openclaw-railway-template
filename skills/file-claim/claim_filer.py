@@ -547,11 +547,17 @@ def get_2fa_code_from_gmail() -> Optional[str]:
 
     # Method 1: Try gog CLI first (available on Railway)
     import time
+
+    # Wait 10s on the first attempt to give the email time to arrive
+    print("[2FA] Waiting 10s for verification email to arrive...")
+    time.sleep(10)
+
     for attempt in range(18):  # 18 attempts × 5s = 90s
         try:
             # STEP 1: Search for the 2FA email (returns metadata only)
+            # Use newer_than:15m to avoid picking up old codes from previous attempts
             result = subprocess.run(
-                ["gog", "gmail", "search", "from:noreply@bcbsglobalsolutions.com verification code", "--max", "1", "--json"],
+                ["gog", "gmail", "search", "from:noreply@bcbsglobalsolutions.com verification code newer_than:15m", "--max", "1", "--json"],
                 capture_output=True, text=True, timeout=15, env=GOG_ENV
             )
             if attempt == 0:
