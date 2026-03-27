@@ -945,7 +945,27 @@ async def login(page: Page) -> None:
         # Check if 2FA is required
         await handle_2fa(page)
 
+        # Wait for redirect back to the Flutter portal after auth
+        print("[AUTH] Waiting for post-login redirect...")
+        await asyncio.sleep(5)
+        await take_screenshot(page, "after_2fa")
+        print(f"[AUTH] Current URL after auth: {page.url}")
+
+        # Verify we landed on the portal, not back on login
+        # The portal URL should contain the base domain, not the SSO/oauth URL
+        current_url = page.url
+        if "login" in current_url.lower() or "authorize" in current_url.lower() or "signin" in current_url.lower():
+            print("[AUTH] WARNING: Still on login/auth page after sign-in. Trying to navigate to portal...")
+            await page.goto(BCBS_PORTAL_URL, wait_until="networkidle")
+            await asyncio.sleep(5)
+            print(f"[AUTH] After forced nav: {page.url}")
+            await take_screenshot(page, "forced_nav_to_portal")
+
+        # Wait for Flutter to fully load the dashboard
+        await asyncio.sleep(5)
+        await wait_for_flutter(page)
         await take_screenshot(page, "login_success")
+        print(f"[AUTH] Login complete. URL: {page.url}")
         print("[AUTH] Login successful")
     except Exception as e:
         print(f"[ERROR] Login failed: {str(e)}")
@@ -1008,27 +1028,62 @@ async def navigate_to_eclaim(page: Page) -> None:
     Clicks: eClaims → File an eClaim → Get started (Paperless Form)
     """
     print("[NAV] Navigating to eClaim section")
+    print(f"[NAV] Starting URL: {page.url}")
 
     try:
+        # First check: are we even on the portal? If still on login, abort.
+        current_url = page.url
+        if "login" in current_url.lower() or "authorize" in current_url.lower() or "signin" in current_url.lower():
+            print("[NAV] ERROR: Still on login page! Cannot navigate to eClaim.")
+            await take_screenshot(page, "nav_still_on_login")
+            raise Exception(f"Cannot navigate to eClaim — still on login page: {current_url}")
+
+        await dump_page_state(page, "NAV_DASHBOARD")
+
         # Click "eClaims" on dashboard
         eclaims_btn = page.get_by_role("button", name=re.compile("eclaim", re.IGNORECASE))
-        if await eclaims_btn.count() > 0:
+        btn_count = await eclaims_btn.count()
+        print(f"[NAV] eClaims button count: {btn_count}")
+        if btn_count > 0:
             await eclaims_btn.first.click()
+            await asyncio.sleep(3)
             await wait_for_flutter(page)
+            print(f"[NAV] After eClaims click, URL: {page.url}")
+        else:
+            # Maybe we're already on eClaim page or need link instead of button
+            eclaims_link = page.get_by_role("link", name=re.compile("eclaim", re.IGNORECASE))
+            if await eclaims_link.count() > 0:
+                await eclaims_link.first.click()
+                await asyncio.sleep(3)
+                await wait_for_flutter(page)
+                print(f"[NAV] Clicked eClaims link, URL: {page.url}")
+            else:
+                print("[NAV] WARNING: No eClaims button or link found on dashboard")
+                await take_screenshot(page, "nav_no_eclaims_button")
 
         # Click "File an eClaim"
         file_btn = page.get_by_role("button", name=re.compile("file.*claim|file an.*claim", re.IGNORECASE))
-        if await file_btn.count() > 0:
+        btn_count = await file_btn.count()
+        print(f"[NAV] File eClaim button count: {btn_count}")
+        if btn_count > 0:
             await file_btn.first.click()
+            await asyncio.sleep(3)
             await wait_for_flutter(page)
+        else:
+            print("[NAV] WARNING: No 'File an eClaim' button found")
 
         # Click "Get started" for Paperless Form
         start_btn = page.get_by_role("button", name=re.compile("get started|start", re.IGNORECASE))
-        if await start_btn.count() > 0:
+        btn_count = await start_btn.count()
+        print(f"[NAV] Get started button count: {btn_count}")
+        if btn_count > 0:
             await start_btn.first.click()
+            await asyncio.sleep(3)
             await wait_for_flutter(page)
 
         await dismiss_popups(page)
+        print(f"[NAV] Final URL: {page.url}")
+        await take_screenshot(page, "nav_eclaim_wizard")
         print("[NAV] Navigated to eClaim wizard")
     except Exception as e:
         print(f"[ERROR] Failed to navigate to eClaim: {str(e)}")
