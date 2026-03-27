@@ -28,6 +28,11 @@ The script handles EVERYTHING internally:
 3. **DO NOT** read or modify the Python source code.
 4. **DO NOT** try to "help" the script by running parts of it manually.
 5. **DO NOT** fall back to manual browser automation if the script fails.
+6. **DO NOT** investigate, analyze, or debug anything yourself. Just run the command and report the output.
+
+## COST WARNING
+
+Every token you use costs Fernanda real money. Do NOT ramble, do NOT investigate, do NOT read source files to "understand" them. Run the one command, report the result, stop. Long exploratory sessions where you read files, analyze code, and try multiple approaches are EXTREMELY expensive and waste her money. Be brief. Be direct. Run the script. Report. Stop.
 
 ## If The Script Fails
 
