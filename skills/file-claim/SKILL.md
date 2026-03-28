@@ -8,7 +8,7 @@
 Run the claim filer script. **Run it exactly as shown — do not modify, do not improvise, do not read the source code to "understand" it.**
 
 ```bash
-GOOGLE_SHEET_ID=1wU7iuAH7mZdenIKNAyrUFuJkVjZsYjxeL07NzqUwMYk GOOGLE_SHEET_TAB=2026 python3 /data/workspace/skills/file-claim/claim_filer_api.py
+python3 /data/workspace/skills/file-claim/claim_filer_api.py
 ```
 
 The script handles EVERYTHING internally:

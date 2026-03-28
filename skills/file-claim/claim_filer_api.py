@@ -49,7 +49,7 @@ except ImportError:
 # CONFIGURATION
 # ============================================================================
 
-SCRIPT_VERSION = "api-v8-fix-gog-config-2026-03-27"
+SCRIPT_VERSION = "api-v9-hardcode-all-defaults-2026-03-27"
 print(f"[INIT] BCBS API Claim Filer {SCRIPT_VERSION} initialized at {datetime.now().isoformat()}")
 
 API_BASE = "https://claimsapire.hthworldwide.com/v4"
@@ -212,14 +212,16 @@ SERVICE_KEYWORD_FALLBACK = {
     "hospital": "Inpatient Hospital Admission",
 }
 
-# Google Sheets config
-GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "")
-GOOGLE_SHEET_TAB = os.environ.get("GOOGLE_SHEET_TAB", "Medical Bills")
+# Google Sheets config — hardcoded defaults so it works without env vars
+GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "1wU7iuAH7mZdenIKNAyrUFuJkVjZsYjxeL07NzqUwMYk")
+GOOGLE_SHEET_TAB = os.environ.get("GOOGLE_SHEET_TAB", "2026")
 
-# gog CLI environment
+# gog CLI environment — hardcode ALL required vars
 GOG_ENV = os.environ.copy()
-gog_config = os.environ.get("GOG_CONFIG_DIR", "/data/workspace/.config")
-GOG_ENV["GOG_CONFIG_DIR"] = gog_config
+GOG_ENV["GOG_CONFIG_DIR"] = os.environ.get("GOG_CONFIG_DIR", "/data/workspace/.config")
+GOG_ENV["XDG_CONFIG_HOME"] = os.environ.get("XDG_CONFIG_HOME", "/data/workspace/.config")
+GOG_ENV["GOG_ACCOUNT"] = os.environ.get("GOG_ACCOUNT", "fernanda.mdcruz@gmail.com")
+GOG_ENV["GOG_KEYRING_PASSWORD"] = os.environ.get("GOG_KEYRING_PASSWORD", "ferdybot-calendar-2026")
 
 
 # ============================================================================
