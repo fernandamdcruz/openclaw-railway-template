@@ -49,7 +49,7 @@ except ImportError:
 # CONFIGURATION
 # ============================================================================
 
-SCRIPT_VERSION = "api-v7-tg-from-config-2026-03-27"
+SCRIPT_VERSION = "api-v8-fix-gog-config-2026-03-27"
 print(f"[INIT] BCBS API Claim Filer {SCRIPT_VERSION} initialized at {datetime.now().isoformat()}")
 
 API_BASE = "https://claimsapire.hthworldwide.com/v4"
@@ -218,9 +218,8 @@ GOOGLE_SHEET_TAB = os.environ.get("GOOGLE_SHEET_TAB", "Medical Bills")
 
 # gog CLI environment
 GOG_ENV = os.environ.copy()
-gog_config = os.environ.get("GOG_CONFIG_DIR")
-if gog_config:
-    GOG_ENV["GOG_CONFIG_DIR"] = gog_config
+gog_config = os.environ.get("GOG_CONFIG_DIR", "/data/workspace/.config")
+GOG_ENV["GOG_CONFIG_DIR"] = gog_config
 
 
 # ============================================================================
