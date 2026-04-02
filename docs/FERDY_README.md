@@ -136,31 +136,51 @@ persists even if the deploy fails, so the config will be picked up by the next c
 
 ## BCBS Claim Filing Skill
 
-FerdyBot can automatically file insurance reimbursement claims on the GeoBlue/BCBS member portal.
+FerdyBot can automatically file insurance reimbursement claims on the GeoBlue/BCBS member portal via direct API calls (no browser automation).
 
 ### Files
-- **`/data/workspace/skills/file-claim/SKILL.md`** (16.5 KB) — The skill definition with accessibility-based selectors for Flutter Web. Loaded on-demand (not every session).
+- **`skills/file-claim/SKILL.md`** — Skill definition. Tells FerdyBot to run the Python script (nothing else).
   - Source of truth: https://github.com/fernandamdcruz/openclaw-railway-template/blob/main/skills/file-claim/SKILL.md
-  - Deploy: `mkdir -p /data/workspace/skills/file-claim && curl -sL https://raw.githubusercontent.com/fernandamdcruz/openclaw-railway-template/main/skills/file-claim/SKILL.md -o /data/workspace/skills/file-claim/SKILL.md`
-- **`/data/workspace/read_2fa.py`** (2.1 KB, executable) — Gmail 2FA code reader. Called automatically when the portal requests a verification code.
+  - Deploy: `entrypoint.sh` copies from `/app/skills/` to `/data/workspace/skills/` on container start
+- **`skills/file-claim/claim_filer_api.py`** — Main claim filing script (~1500 lines). Handles everything: sheets reading, auth, API filing, doc upload, Telegram notifications.
+  - Version tag: `api-v9-hardcode-all-defaults-2026-03-27`
+- **`skills/file-claim/claim_filer.py`** — Legacy Playwright-based filer, now only used as fallback for 2FA code extraction from Gmail.
+- **`skills/file-claim/test_file_claim.py`** — Standalone API test script. Bypasses sheets/auth, uses manual `BCBS_TOKEN` env var.
 
-### How it works
-1. FerdyBot reads pending claims from Google Sheets
-2. Launches a cloud browser via Browserbase (profile `browserbase`)
-3. Logs into `https://members.bcbsglobalsolutions.com` with `BCBS_USERNAME` / `BCBS_PASSWORD` env vars
-4. If 2FA is triggered: `read_2fa.py` queries Gmail via `gog mail list` automatically (no manual input needed). Retries for 90s.
-5. Navigates to eClaim, fills in provider/date/amount fields
-6. Submits and captures the claim reference number
-7. Updates Google Sheets row status to "Filed"
+### How it works (API-based, as of 2026-03-27)
+1. FerdyBot runs `python3 /data/workspace/skills/file-claim/claim_filer_api.py`
+2. Script reads pending claims from Google Sheets (via `gog` CLI)
+3. Script authenticates to BCBS Okta via Playwright → when 2FA hits, asks Fernanda on Telegram for the 6-digit code
+4. Files each claim via REST API (`claimsapire.hthworldwide.com/v4`):
+   - Step 1: POST /claimants/save/ (create claim + set claimant)
+   - Step 2: POST /insurance/save/ (set other insurance = none)
+   - Step 3: POST /charges/save/ (add charge with provider, amount, dates)
+   - Step 4: Download receipt from Google Drive, upload via S3 presigned URL
+   - Step 5: POST /paymentaccounts/save/ (set wire payment to saved account)
+   - Step 6: POST /claims/submit (submit with signature + terms agreement)
+5. Updates Google Sheets row status to "Filed" and writes claim reference number
+
+### First successful end-to-end filing: 2026-03-27
+Claim CLM-1066884 for Fernanda / Clínica Oftalmológica SW Ltda — filed and submitted successfully, confirmed by BCBS email.
 
 ### ⚠️ Reimbursement Method — ALWAYS WIRE, NEVER CHECK
 
 **ALWAYS select WIRE as the reimbursement method. NEVER select CHECK.**
 
-The pre-saved bank account on file is a US account (USD). When filling Step 5 (Reimbursement Details):
-- Method: **WIRE**
-- Account: the pre-saved US account
-- Currency: **USD**
+The pre-saved bank account on file is a US account (USD). PaymentAccountID: 141210.
+
+### ⚠️ CRITICAL: All claims MUST have a receipt/document attached
+
+Claims submitted without a supporting document (invoice/receipt) will be rejected by BCBS. The script downloads the file from Google Drive (column N) and uploads it to the claim. If document upload fails, the script should NOT submit the claim.
+
+### Hardcoded defaults (no env vars needed)
+The script hardcodes all defaults so it works without any env vars beyond what Railway already has:
+- `GOOGLE_SHEET_ID` = `1wU7iuAH7mZdenIKNAyrUFuJkVjZsYjxeL07NzqUwMYk`
+- `GOG_CONFIG_DIR` = `/data/workspace/.config`
+- `XDG_CONFIG_HOME` = `/data/workspace/.config`
+- `GOG_ACCOUNT` = `fernanda.mdcruz@gmail.com`
+- `GOG_KEYRING_PASSWORD` = `ferdybot-calendar-2026`
+- Telegram bot token read from `/data/.openclaw/openclaw.json` → `channels.telegram.botToken`
 
 ### Google Sheets Data Source
 
@@ -342,6 +362,12 @@ The `commitSha` parameter is optional but recommended — without it, Railway de
 
 ## Incident Log
 
+### 2026-03-27: BCBS API claim filing — first successful end-to-end
+- **What happened**: After days of failed Playwright-based browser automation attempts, switched to direct REST API calls (`claimsapire.hthworldwide.com/v4`). Tested locally via Railway CLI with a manually provided BCBS token. Discovered and fixed multiple issues: wrong API body structures (wrapper keys like `OtherInsuranceDetail` vs `Insurance`, `PaymentAccountDetail` vs `PaymentAccount`), missing env var defaults, Telegram bot token not found, 2FA code reuse.
+- **Key fixes**: (1) All API request bodies now match exact structure from BCBS portal (full `make_claim_object()` in every step), (2) All env var defaults hardcoded in script, (3) Telegram creds read from OpenClaw config file, (4) 2FA code reuse prevention via `/tmp/bcbs_2fa_used_codes.txt`, (5) SKILL.md rewritten to stop FerdyBot from reading/analyzing the script instead of running it.
+- **Result**: Claim CLM-1066884 filed and confirmed by email.
+- **Lesson**: Local testing via Railway CLI (`railway shell` + `BCBS_TOKEN=<token> python3 test_file_claim.py`) was the breakthrough. Iterating locally took minutes vs hours of deploy cycles. See Lessons Learned #0.
+
 ### 2026-03-24: Gateway crash-loop — missing `color` field in browser profiles
 - **Cause**: OpenClaw config validation requires a `color` field (string) on every browser profile. The volume config had profiles with only `cdpUrl`, missing the mandatory `color`. This caused the gateway to crash on startup with: `Invalid config at /data/.openclaw/openclaw.json: browser.profiles.openclaw.color: Invalid input: expected string, received undefined`
 - **Symptom**: FerdyBot completely offline. Service would start, fail config validation, exit code=1, repeat (crash-loop). Railway showed "Completed ⚠" with healthcheck timeout.
@@ -518,6 +544,33 @@ Until these fixes are deployed, **manual `/reset`** in Telegram is the only reli
 ---
 
 ## Lessons Learned
+
+0. **🚨 TEST LOCALLY VIA RAILWAY CLI BEFORE DEPLOYING — the #1 lesson from 2026-03-27**
+
+   The BCBS claim filing script went through ~15 deploy-fail-debug cycles over several days because every fix was deployed blind to the Railway server, then tested via FerdyBot, then debugged from FerdyBot's limited output. This wasted days and cost significant API credits.
+
+   **What finally worked**: Install Railway CLI on your Mac (`npx @railway/cli`), link to the project, run `railway shell` to load Railway env vars locally, then run the Python script directly on your Mac. This gives you:
+   - Instant feedback (no 9-minute Docker builds)
+   - Full terminal output (not filtered through FerdyBot's summarization)
+   - Ability to iterate rapidly (edit → run → see error → fix → run again in seconds)
+   - Direct control over env vars (e.g. `BCBS_TOKEN=<token> python3 script.py`)
+
+   **Setup (one-time)**:
+   ```bash
+   npx @railway/cli login        # Opens browser to authenticate
+   npx @railway/cli link          # Link to the project
+   npx @railway/cli shell         # Opens shell with Railway env vars loaded
+   # Now run scripts directly:
+   python3 skills/file-claim/claim_filer_api.py
+   ```
+
+   **For BCBS API testing**: Grab a Bearer token from DevTools (Network tab → any API request → Authorization header), then:
+   ```bash
+   BCBS_TOKEN="<token>" python3 skills/file-claim/test_file_claim.py
+   ```
+   Token expires in 10 minutes. This bypasses all auth/Playwright complexity and tests the API flow directly.
+
+   **Rule**: Never deploy a fix you haven't tested locally first. The deploy-and-pray cycle is a trap — it feels like progress but wastes time and money. Local testing with Railway CLI is 100x faster.
 
 1. **Pre-deploy commands cannot access the persistent volume** — the volume is only mounted
    for the main container, not during pre-deploy. Use the start command instead.

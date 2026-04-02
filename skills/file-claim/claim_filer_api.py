@@ -850,41 +850,87 @@ def format_date_api(date_str: str) -> str:
 # DOCUMENT UPLOAD
 # ============================================================================
 
+def _extract_drive_file_id(drive_link: str) -> Optional[str]:
+    """Extract Google Drive file ID from various URL formats."""
+    if "/d/" in drive_link:
+        return drive_link.split("/d/")[1].split("/")[0].split("?")[0]
+    elif "id=" in drive_link:
+        return drive_link.split("id=")[1].split("&")[0]
+    elif not drive_link.startswith("http"):
+        return drive_link  # Assume it's already a file ID
+    return None
+
+
 def download_from_drive(drive_link: str, output_path: str) -> bool:
-    """Download a file from Google Drive using gog CLI."""
+    """Download a file from Google Drive. Tries direct HTTP first, then gog CLI as fallback."""
     print(f"[DOC] Downloading from Drive: {drive_link}")
 
-    # Extract file ID from various Drive URL formats
-    file_id = None
-    if "/d/" in drive_link:
-        file_id = drive_link.split("/d/")[1].split("/")[0].split("?")[0]
-    elif "id=" in drive_link:
-        file_id = drive_link.split("id=")[1].split("&")[0]
-    elif drive_link.startswith("http"):
-        # Try the whole URL
-        file_id = drive_link
-    else:
-        file_id = drive_link
-
+    file_id = _extract_drive_file_id(drive_link)
     if not file_id:
         print(f"[DOC] Could not extract file ID from: {drive_link}")
         return False
 
+    print(f"[DOC] Extracted file ID: {file_id}")
+
+    # Method 1: Direct HTTP download via Google Drive API
+    # Uses the confirm=1 trick to bypass the virus scan warning for large files
+    for download_url in [
+        f"https://drive.google.com/uc?export=download&id={file_id}&confirm=1",
+        f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media",
+    ]:
+        try:
+            print(f"[DOC] Trying direct download: {download_url[:80]}...")
+            resp = requests.get(download_url, timeout=60, allow_redirects=True)
+            if resp.status_code == 200 and len(resp.content) > 100:
+                # Check it's not an HTML error page
+                if not resp.content[:50].strip().startswith(b"<!"):
+                    with open(output_path, "wb") as f:
+                        f.write(resp.content)
+                    print(f"[DOC] Direct download success: {len(resp.content)} bytes")
+                    return True
+                else:
+                    print(f"[DOC] Got HTML instead of file (probably needs auth)")
+            else:
+                print(f"[DOC] Direct download failed: status={resp.status_code}, size={len(resp.content)}")
+        except Exception as e:
+            print(f"[DOC] Direct download error: {e}")
+
+    # Method 2: gog CLI (may have Drive OAuth scope)
     try:
+        print(f"[DOC] Trying gog drive download...")
         result = subprocess.run(
-            ["gog", "drive", "download", file_id, "--output", output_path],
+            ["gog", "drive", "download", file_id, "--out", output_path],
             capture_output=True, text=True, timeout=60, env=GOG_ENV
         )
         if result.returncode == 0:
             file_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
-            print(f"[DOC] Downloaded successfully: {file_size} bytes")
-            return file_size > 0
+            print(f"[DOC] gog download result: {file_size} bytes")
+            if file_size > 0:
+                return True
         else:
-            print(f"[DOC] Download failed: {result.stderr[:200]}")
-            return False
+            print(f"[DOC] gog download failed: {result.stderr[:200]}")
     except Exception as e:
-        print(f"[DOC] Download error: {e}")
-        return False
+        print(f"[DOC] gog download error: {e}")
+
+    # Method 3: gog drive export (alternate command)
+    try:
+        print(f"[DOC] Trying gog drive export...")
+        result = subprocess.run(
+            ["gog", "drive", "export", file_id, "--out", output_path],
+            capture_output=True, text=True, timeout=60, env=GOG_ENV
+        )
+        if result.returncode == 0:
+            file_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
+            print(f"[DOC] gog export result: {file_size} bytes")
+            if file_size > 0:
+                return True
+        else:
+            print(f"[DOC] gog export failed: {result.stderr[:200]}")
+    except Exception as e:
+        print(f"[DOC] gog export error: {e}")
+
+    print(f"[DOC] All download methods failed for file_id={file_id}")
+    return False
 
 
 def upload_document(claim_id: int, charge_id: int, file_path: str) -> Optional[dict]:
@@ -1322,7 +1368,7 @@ def file_single_claim(claim_data: dict) -> Tuple[bool, str]:
 
         print(f"[STEP 3] Charge added: ChargeID={charge_id}")
 
-        # ── Step 4: Upload supporting document ──
+        # ── Step 4: Upload supporting document (MANDATORY) ──
         if claim_data.get("drive_link"):
             print("\n[STEP 4] Uploading supporting document...")
 
@@ -1337,20 +1383,26 @@ def file_single_claim(claim_data: dict) -> Tuple[bool, str]:
             with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tmp:
                 tmp_path = tmp.name
 
+            doc_uploaded = False
             try:
                 if download_from_drive(link, tmp_path):
                     doc_info = upload_document(claim_id, charge_id, tmp_path)
-                    if doc_info:
+                    if doc_info and doc_info.get("ChargeDocumentID"):
                         print(f"[STEP 4] Document uploaded: {doc_info.get('ChargeDocumentID')}")
+                        doc_uploaded = True
                     else:
-                        print("[STEP 4] WARNING: Document upload failed, continuing without doc")
+                        print("[STEP 4] FAILED: Document upload to BCBS failed")
                 else:
-                    print("[STEP 4] WARNING: Could not download from Drive, continuing without doc")
+                    print("[STEP 4] FAILED: Could not download file from Drive")
             finally:
                 if os.path.exists(tmp_path):
                     os.unlink(tmp_path)
+
+            if not doc_uploaded:
+                return (False, f"Document upload failed for claim {claim_id} — claim NOT submitted (receipt is required). Drive link: {link}")
         else:
-            print("\n[STEP 4] No supporting document link, skipping upload")
+            # No drive link = no receipt = cannot submit
+            return (False, f"No supporting document link in sheet for claim {claim_id} — claim NOT submitted (receipt is required)")
 
         # ── Step 5: Set payment account ──
         print("\n[STEP 5] Setting payment account...")
