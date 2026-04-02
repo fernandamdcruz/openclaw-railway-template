@@ -4,6 +4,7 @@ node_modules
 .tmpdata
 *.md
 !README.md
+!TOOLS.md
 docs
 .env*
 .DS_Store
