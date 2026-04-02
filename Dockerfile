@@ -69,6 +69,7 @@ RUN apt-get update \
  # COPY skills LAST so changes to skill files don't invalidate the expensive
  # Chromium/Homebrew/gogcli layers above. This keeps rebuilds under 30s.
  COPY skills ./skills
+COPY TOOLS.md ./TOOLS.md
 
  USER root
  ENTRYPOINT ["./entrypoint.sh"]
