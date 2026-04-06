@@ -6,11 +6,46 @@ Generate monthly GPS (Guia da Previdência Social) boletos for Fernanda and Max 
 ## Trigger
 Say "GPS boleto", "gerar GPS", "boleto previdência", or similar. Also triggered by the monthly cron job on the 5th.
 
+## Availability Check (cron trigger only)
+
+When this skill is triggered by the **monthly cron job** (NOT when Fernanda asks manually):
+
+1. **Ask first — do NOT open any browser or start automation yet.**
+   Send via Telegram (chat ID: 8409634074):
+   ```
+   GPS boleto time! Competência: [previous month/year].
+   Preciso da sua ajuda para resolver o CAPTCHA no portal SAL.
+   Agora é um bom momento? Responda:
+   • "sim" — começo agora
+   • "depois" — pergunto de novo em 12h
+   • "dispensar" — cancelo o lembrete deste mês
+   ```
+
+2. **If Fernanda replies "sim" / "yes" / affirmative** → proceed to the Workflow section below.
+
+3. **If no response within 30 minutes, OR she replies "depois" / "later":**
+   - Reply: "OK! Pergunto de novo em 12 horas."
+   - Wait 12 hours, then re-send the availability message (step 1).
+
+4. **Reminder loop**: Keep re-asking every 12 hours until she either says "sim" or "dispensar".
+
+5. **If she replies "dispensar" / "dismiss" / "cancelar":**
+   - Reply: "OK, GPS [month] não será gerado automaticamente. Diga 'GPS boleto' quando quiser gerar manualmente."
+   - Stop all reminders for this month.
+
+**When triggered manually** (Fernanda says "GPS boleto" in chat): skip this section entirely — she's available. Go straight to Workflow.
+
 ## Workflow
 
-### Setup
-- Use browser profile `browserbase` (NOT the default `openclaw` profile)
-- After creating the session, get the **live view URL** and send it to Fernanda via Telegram (chat ID: 8409634074) so she can watch and interact
+### Setup — MANDATORY
+- **You MUST use browser profile `browserbase`** (NOT the default `openclaw` profile). This is critical — `browserbase` provides a live view URL that Fernanda can open from her phone/laptop to solve CAPTCHAs remotely.
+- After creating the Browserbase session, get the **live view URL**
+- Send it to Fernanda via Telegram (chat ID: 8409634074):
+  ```
+  GPS boleto session started! Live view URL: [live view URL]
+  Abra este link para acompanhar e resolver o CAPTCHA quando aparecer.
+  ```
+- **Do NOT proceed with form filling until you've sent the live view URL.**
 
 ### For each person (Fernanda first, then Max):
 
@@ -27,7 +62,7 @@ Say "GPS boleto", "gerar GPS", "boleto previdência", or similar. Also triggered
 **Step 3: CAPTCHA**
 - Click the reCAPTCHA "Não sou um robô" checkbox
 - If an image challenge appears, send Telegram message: "CAPTCHA apareceu! Abra o live view e resolva: [live view URL]"
-- Wait up to 3 minutes for Fernanda to solve it
+- Wait up to 5 minutes for Fernanda to solve it
 - Once CAPTCHA is solved (green checkmark visible), proceed
 
 **Step 4: Click Consultar**
@@ -75,5 +110,5 @@ Say "GPS boleto", "gerar GPS", "boleto previdência", or similar. Also triggered
 - Competência is ALWAYS the previous month (paying in April = competência March)
 - Code 1163 = 11% reduced rate over minimum wage (salário mínimo)
 - The SAL portal has reCAPTCHA v2 — Browserbase's built-in CAPTCHA solving may handle it automatically. If not, Fernanda solves via live view.
-- Always use browser profile `browserbase`, never `openclaw` for this skill
+- **Always use browser profile `browserbase`, never `openclaw` for this skill**
 - Telegram delivery chat ID: 8409634074

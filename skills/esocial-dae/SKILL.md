@@ -6,12 +6,46 @@ Generate monthly eSocial DAE (Documento de Arrecadação do eSocial) payment sli
 ## Trigger
 Say "eSocial", "DAE", "guia eSocial", "pagamento doméstica", or similar. Also triggered by monthly cron job.
 
+## Availability Check (cron trigger only)
+
+When this skill is triggered by the **monthly cron job** (NOT when Fernanda asks manually):
+
+1. **Ask first — do NOT open any browser or start automation yet.**
+   Send via Telegram (chat ID: 8409634074):
+   ```
+   eSocial DAE time! Competência: [previous month/year].
+   Preciso que você faça login no gov.br pelo live view.
+   Agora é um bom momento? Responda:
+   • "sim" — começo agora
+   • "depois" — pergunto de novo em 12h
+   • "dispensar" — cancelo o lembrete deste mês
+   ```
+
+2. **If Fernanda replies "sim" / "yes" / affirmative** → proceed to the Workflow section below.
+
+3. **If no response within 30 minutes, OR she replies "depois" / "later":**
+   - Reply: "OK! Pergunto de novo em 12 horas."
+   - Wait 12 hours, then re-send the availability message (step 1).
+
+4. **Reminder loop**: Keep re-asking every 12 hours until she either says "sim" or "dispensar".
+
+5. **If she replies "dispensar" / "dismiss" / "cancelar":**
+   - Reply: "OK, eSocial DAE [month] não será gerado automaticamente. Diga 'eSocial DAE' quando quiser gerar manualmente."
+   - Stop all reminders for this month.
+
+**When triggered manually** (Fernanda says "eSocial" or "DAE" in chat): skip this section entirely — she's available. Go straight to Workflow.
+
 ## Workflow
 
-### Setup
-- Use browser profile `browserbase` (NOT the default `openclaw` profile)
-- After creating the session, get the **live view URL** and send it to Fernanda via Telegram (chat ID: 8409634074)
-- Message: "eSocial DAE time! Abra o live view para autenticação gov.br: [live view URL]"
+### Setup — MANDATORY
+- **You MUST use browser profile `browserbase`** (NOT the default `openclaw` profile). This is critical — `browserbase` provides a live view URL that Fernanda needs to log into gov.br.
+- After creating the Browserbase session, get the **live view URL**
+- Send it to Fernanda via Telegram (chat ID: 8409634074):
+  ```
+  eSocial DAE session started! Live view URL: [live view URL]
+  Abra este link para fazer login no gov.br quando eu pedir.
+  ```
+- **Do NOT proceed until you've sent the live view URL.**
 
 ### Step 1: Navigate to eSocial portal
 - URL: `https://login.esocial.gov.br`
@@ -56,12 +90,12 @@ Say "eSocial", "DAE", "guia eSocial", "pagamento doméstica", or similar. Also t
 - The gov.br portal requires human authentication — Fernanda MUST log in via the live view URL
 - Browserbase live view lets her see and interact with the browser session in real-time
 - After authentication, FerdyBot can navigate the remaining steps
-- Always use browser profile `browserbase`, never `openclaw` for this skill
+- **Always use browser profile `browserbase`, never `openclaw` for this skill**
 - The eSocial portal structure may vary — take screenshots at each step for debugging
 - If the portal layout changes, coordinates/selectors may need recalibration
 - Telegram delivery chat ID: 8409634074
 
-## ⚠️ Important
+## Important
 - Fernanda needs to provide: employee names, CPF (employer), and any login credentials separately
 - Do NOT store gov.br passwords in Railway env vars or skill files
 - Authentication is always done by Fernanda via the Browserbase live view
