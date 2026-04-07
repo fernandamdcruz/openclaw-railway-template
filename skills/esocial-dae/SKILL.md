@@ -35,6 +35,10 @@ When this skill is triggered by the **monthly cron job** (NOT when Fernanda asks
 
 **When triggered manually** (Fernanda says "eSocial" or "DAE" in chat): skip this section entirely — she's available. Go straight to Workflow.
 
+## CRITICAL: Browserbase Budget
+
+We have **60 free Browserbase minutes/month**. Each script run creates a session that burns minutes from the moment it starts — even if it fails or idles. Do NOT run the script until Fernanda has confirmed she is available ("sim"). A wasted session means fewer minutes for the real run.
+
 ## Workflow
 
 **Do NOT try to use the browser tool directly.** Run the Python script instead:
@@ -72,6 +76,6 @@ After the script finishes, tell Fernanda:
 - Telegram delivery chat ID: 8409634074
 
 ## Important
-- Do NOT store gov.br passwords in Railway env vars or skill files
-- Authentication is always done by Fernanda via the Browserbase live view
-- Do NOT try to automate the gov.br login — it requires human interaction
+- Gov.br credentials (GOVBR_CPF, GOVBR_PASSWORD) are stored as Railway env vars — the script auto-fills them
+- After auto-fill, gov.br shows a bot verification challenge that Fernanda must complete via live view
+- Do NOT try to bypass the bot verification — it requires human interaction

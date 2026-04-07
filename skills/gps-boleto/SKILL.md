@@ -35,6 +35,10 @@ When this skill is triggered by the **monthly cron job** (NOT when Fernanda asks
 
 **When triggered manually** (Fernanda says "GPS boleto" in chat): skip this section entirely — she's available. Go straight to running the script.
 
+## CRITICAL: Browserbase Budget
+
+We have **60 free Browserbase minutes/month**. Each script run creates a session that burns minutes from the moment it starts — even if it fails or idles. Do NOT run the script until Fernanda has confirmed she is available ("sim"). A wasted session means fewer minutes for the real run.
+
 ## How to Run
 
 **Just run the Python script. Do not try to use the browser directly.**
