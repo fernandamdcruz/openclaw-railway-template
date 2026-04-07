@@ -390,6 +390,11 @@ def generate_boleto_for_person(
 
         sal_input = page.locator('#input-salario')
         sal_input.fill(SALARIO_MINIMO)
+        # The br-input currency field sometimes doesn't validate after fill().
+        # Workaround: delete the last char and retype it to trigger validation.
+        sal_input.press("End")
+        sal_input.press("Backspace")
+        sal_input.type("0", delay=50)
         print(f"[GPS] Salário filled: {SALARIO_MINIMO}")
     except Exception as e:
         print(f"[GPS] Fill error: {e}")
@@ -404,6 +409,11 @@ def generate_boleto_for_person(
     try:
         page.get_by_text("Confirmar", exact=True).first.click(timeout=5000)
         time.sleep(2)
+        # Wait for the br-scrim overlay to disappear (Angular transition)
+        try:
+            page.locator("br-scrim[show]").wait_for(state="hidden", timeout=5000)
+        except Exception:
+            time.sleep(2)  # fallback wait
         print(f"[GPS] Modal confirmed — contribution added to list")
     except Exception as e:
         print(f"[GPS] Modal confirm error: {e}")
