@@ -54,7 +54,7 @@ from playwright.sync_api import sync_playwright, Page, Browser
 # CONFIGURATION
 # ============================================================================
 
-SCRIPT_VERSION = "gps-v1-2026-04-06"
+SCRIPT_VERSION = "gps-v2-2026-04-06"
 print(f"[INIT] GPS Boleto Generator {SCRIPT_VERSION} at {datetime.now().isoformat()}")
 
 SAL_URL = "https://sal.rfb.gov.br/calculo-contribuicao/contribuintes-2"
@@ -65,6 +65,7 @@ CONTRIBUTORS = [
 ]
 
 PAYMENT_CODE = "1163"  # Contribuinte Individual — Recolhimento Mensal — 11%
+SALARIO_MINIMO = "1621,00"  # 2026 minimum wage
 
 TELEGRAM_CHAT_ID = "8409634074"
 
@@ -270,8 +271,8 @@ def generate_boleto_for_person(
 
     # Step 1: Navigate to SAL portal
     print(f"[GPS] Navigating to SAL portal...")
-    page.goto(SAL_URL, wait_until="networkidle", timeout=30000)
-    time.sleep(2)
+    page.goto(SAL_URL, wait_until="domcontentloaded", timeout=30000)
+    time.sleep(3)  # SAL portal has polling — networkidle never fires
 
     # Take screenshot for debugging
     page.screenshot(path=f"/tmp/gps_{name.lower()}_01_portal.png")
@@ -317,93 +318,157 @@ def generate_boleto_for_person(
 
     page.screenshot(path=f"/tmp/gps_{name.lower()}_03_captcha_done.png")
 
-    # Step 5: Click Consultar (3rd button on page, index 2 — was disabled before CAPTCHA)
+    # Step 5: Click Consultar
     print(f"[GPS] Clicking Consultar...")
     try:
-        # Try text-based first, then fall back to the 3rd button
-        consultar = page.locator("button:has-text('Consultar')")
-        if consultar.count() == 0:
-            # Buttons on this page don't have visible text — use the 3rd button (index 2)
-            consultar = page.locator("button").nth(2)
-        else:
-            consultar = consultar.first
+        consultar = page.get_by_text("Consultar", exact=True)
         consultar.click(timeout=5000)
-        page.wait_for_load_state("networkidle", timeout=15000)
+        time.sleep(4)
     except Exception as e:
         print(f"[GPS] Consultar click error: {e}")
         page.screenshot(path=f"/tmp/gps_{name.lower()}_err_consultar.png")
         return None
 
-    time.sleep(2)
     page.screenshot(path=f"/tmp/gps_{name.lower()}_04_after_consultar.png")
 
-    # Step 6: Select payment code 1163
+    # Step 6: Verification page — click first "Confirmar" (br-button)
+    # Shows contributor details (name, NIT, category) + Confirmar / Nova Consulta
+    print(f"[GPS] Clicking Confirmar on verification page...")
+    try:
+        page.get_by_text("Confirmar", exact=True).first.click(timeout=5000)
+        time.sleep(4)
+        page.screenshot(path=f"/tmp/gps_{name.lower()}_05_after_verify.png")
+        print(f"[GPS] Verification confirmed — on contributions page")
+    except Exception as e:
+        print(f"[GPS] Verification Confirmar error: {e}")
+        page.screenshot(path=f"/tmp/gps_{name.lower()}_err_verify.png")
+        return None
+
+    # Step 7: Select payment code 1163 from <br-select> dropdown
     print(f"[GPS] Selecting payment code {PAYMENT_CODE}...")
     try:
-        code_select = page.locator("select#cdCodPgto, select[name*='odigo'], select[name*='odPgto']")
-        if code_select.is_visible(timeout=5000):
-            code_select.select_option(value=PAYMENT_CODE)
-            print(f"[GPS] Payment code selected: {PAYMENT_CODE}")
-        else:
-            # Try text-based selection
-            page.locator(f"text={PAYMENT_CODE}").first.click()
+        br_select = page.locator('br-select[label="Código Pagamento"]')
+        if not br_select.is_visible(timeout=3000):
+            br_select = page.locator("br-select").first
+        br_select.click()
+        time.sleep(1)
+        page.get_by_text(PAYMENT_CODE, exact=False).first.click()
+        time.sleep(1)
+        print(f"[GPS] Payment code {PAYMENT_CODE} selected")
     except Exception as e:
         print(f"[GPS] Payment code error: {e}")
         page.screenshot(path=f"/tmp/gps_{name.lower()}_err_code.png")
-
-    time.sleep(1)
-
-    # Step 7: Set competência
-    print(f"[GPS] Setting competência: {competencia}")
-    try:
-        comp_input = page.locator("input#competencia, input[name*='ompet'], input[name*='competencia']")
-        if comp_input.is_visible(timeout=5000):
-            comp_input.fill("")
-            comp_input.fill(competencia)
-        else:
-            inputs = page.locator("input[type='text']")
-            for i in range(inputs.count()):
-                inp = inputs.nth(i)
-                placeholder = inp.get_attribute("placeholder") or ""
-                if "mm" in placeholder.lower() or "compet" in placeholder.lower():
-                    inp.fill(competencia)
-                    print(f"[GPS] Competência set in input #{i}")
-                    break
-    except Exception as e:
-        print(f"[GPS] Competência error: {e}")
-        page.screenshot(path=f"/tmp/gps_{name.lower()}_err_comp.png")
-
-    time.sleep(1)
-    page.screenshot(path=f"/tmp/gps_{name.lower()}_05_code_comp.png")
-
-    # Step 8: Click Calcular / Gerar Guia
-    print(f"[GPS] Clicking Calcular/Gerar Guia...")
-    try:
-        calc_btn = page.locator(
-            "button:has-text('Calcular'), input[value='Calcular'], "
-            "button:has-text('Gerar'), input[value*='Gerar']"
-        )
-        calc_btn.first.click(timeout=5000)
-        page.wait_for_load_state("networkidle", timeout=15000)
-    except Exception as e:
-        print(f"[GPS] Calcular click error: {e}")
-        page.screenshot(path=f"/tmp/gps_{name.lower()}_err_calc.png")
         return None
 
-    time.sleep(3)
-    page.screenshot(path=f"/tmp/gps_{name.lower()}_06_boleto.png")
+    page.screenshot(path=f"/tmp/gps_{name.lower()}_06_code_selected.png")
 
-    # Step 9: Extract boleto info
+    # Step 8: Click "+ Adicionar" button (br-button web component)
+    print(f"[GPS] Clicking Adicionar...")
+    try:
+        page.locator('br-button[title="Adicionar"]').click(timeout=5000)
+        time.sleep(2)
+        print(f"[GPS] Adicionar modal opened")
+    except Exception as e:
+        # Fallback: try text match
+        try:
+            page.get_by_text("Adicionar", exact=True).click(timeout=3000)
+            time.sleep(2)
+            print(f"[GPS] Adicionar clicked via text")
+        except Exception as e2:
+            print(f"[GPS] Adicionar error: {e2}")
+            page.screenshot(path=f"/tmp/gps_{name.lower()}_err_adicionar.png")
+            return None
+
+    page.screenshot(path=f"/tmp/gps_{name.lower()}_07_adicionar_modal.png")
+
+    # Step 9: Fill competência (MM/AAAA) and salário in the modal
+    print(f"[GPS] Filling competência: {competencia} and salário: {SALARIO_MINIMO}...")
+    try:
+        comp_input = page.locator('input[placeholder="mm/aaaa"]')
+        comp_input.fill(competencia)
+        print(f"[GPS] Competência filled: {competencia}")
+
+        sal_input = page.locator('#input-salario')
+        sal_input.fill(SALARIO_MINIMO)
+        print(f"[GPS] Salário filled: {SALARIO_MINIMO}")
+    except Exception as e:
+        print(f"[GPS] Fill error: {e}")
+        page.screenshot(path=f"/tmp/gps_{name.lower()}_err_fill.png")
+        return None
+
+    time.sleep(1)
+    page.screenshot(path=f"/tmp/gps_{name.lower()}_08_form_filled.png")
+
+    # Step 10: Click modal "Confirmar" (first of two — modal is on top)
+    print(f"[GPS] Confirming contribution in modal...")
+    try:
+        page.get_by_text("Confirmar", exact=True).first.click(timeout=5000)
+        time.sleep(2)
+        print(f"[GPS] Modal confirmed — contribution added to list")
+    except Exception as e:
+        print(f"[GPS] Modal confirm error: {e}")
+        page.screenshot(path=f"/tmp/gps_{name.lower()}_err_modal_confirm.png")
+        return None
+
+    page.screenshot(path=f"/tmp/gps_{name.lower()}_09_contribution_added.png")
+
+    # Step 11: Click page-level "Confirmar" (last of the visible Confirmar buttons)
+    print(f"[GPS] Clicking page-level Confirmar...")
+    try:
+        page.get_by_text("Confirmar", exact=True).last.click(timeout=5000)
+        time.sleep(4)
+        print(f"[GPS] Page confirmed — on checkbox/selection page")
+    except Exception as e:
+        print(f"[GPS] Page confirm error: {e}")
+        page.screenshot(path=f"/tmp/gps_{name.lower()}_err_page_confirm.png")
+        return None
+
+    page.screenshot(path=f"/tmp/gps_{name.lower()}_10_selection_page.png")
+
+    # Step 12: Checkbox page — "Seleção de Competências"
+    # Check the row checkbox (uses <br-checkbox> wrapping native <input>)
+    print(f"[GPS] Checking competência checkbox...")
+    try:
+        # Get all checkbox inputs — last one is the row, first is "select all"
+        checkboxes = page.locator('input[type="checkbox"]')
+        cb_count = checkboxes.count()
+        print(f"[GPS] Found {cb_count} checkboxes")
+        # Check the last checkbox (the row for our competência)
+        if cb_count > 0:
+            last_cb = checkboxes.last
+            last_cb.check(force=True)
+            print(f"[GPS] Checkbox checked")
+        time.sleep(1)
+    except Exception as e:
+        print(f"[GPS] Checkbox error: {e}")
+        page.screenshot(path=f"/tmp/gps_{name.lower()}_err_checkbox.png")
+        return None
+
+    page.screenshot(path=f"/tmp/gps_{name.lower()}_11_checkbox_checked.png")
+
+    # Step 13: Click "Emitir GPS"
+    print(f"[GPS] Clicking Emitir GPS...")
+    try:
+        page.get_by_text("Emitir GPS", exact=True).click(timeout=5000)
+        time.sleep(5)
+        print(f"[GPS] Emitir GPS clicked — boleto should be generated")
+    except Exception as e:
+        print(f"[GPS] Emitir GPS error: {e}")
+        page.screenshot(path=f"/tmp/gps_{name.lower()}_err_emitir.png")
+        return None
+
+    page.screenshot(path=f"/tmp/gps_{name.lower()}_12_boleto.png")
+
+    # Step 14: Extract boleto info
     print(f"[GPS] Extracting boleto info...")
     result = extract_boleto_info(page)
 
     if result:
         print(f"[GPS] Boleto for {name}: {result}")
-        page.screenshot(path=f"/tmp/gps_{name.lower()}_07_done.png")
+        page.screenshot(path=f"/tmp/gps_{name.lower()}_13_done.png")
     else:
         print(f"[GPS] Could not extract boleto info for {name}")
         page.screenshot(path=f"/tmp/gps_{name.lower()}_err_extract.png")
-        # Send screenshot info
         send_telegram(
             f"Não consegui extrair a linha digitável para {name}. "
             f"Verifique os screenshots em /tmp/gps_{name.lower()}_*.png"
@@ -413,23 +478,44 @@ def generate_boleto_for_person(
 
 
 def extract_boleto_info(page: Page) -> Optional[dict]:
-    """Extract linha digitável, valor, and vencimento from the boleto page."""
-    page_text = page.inner_text("body")
+    """Extract linha digitável, valor, and vencimento from the boleto result page."""
+    import re
 
-    # Look for "Linha Digitável" or a 47-48 digit number pattern
+    # SAL portal is Angular — inner_text("body") can return empty.
+    # Try multiple extraction methods.
+    page_text = ""
+    try:
+        page_text = page.inner_text("body") or ""
+    except Exception:
+        pass
+    if len(page_text.strip()) < 20:
+        try:
+            page_text = page.text_content("body") or ""
+        except Exception:
+            pass
+    if len(page_text.strip()) < 20:
+        # Last resort: get all text from all elements
+        try:
+            texts = page.locator("*").all_text_contents()
+            page_text = " ".join(t.strip() for t in texts if t.strip())
+        except Exception:
+            pass
+
+    print(f"[GPS] Extracted {len(page_text)} chars of page text")
+    print(f"[GPS] Page text (first 1000 chars): {page_text[:1000]}")
+
     linha = None
     valor = None
     vencimento = None
 
-    # Try to find linha digitável — typically a 47-48 digit number with dots/spaces
-    import re
-
-    # Pattern: groups of digits separated by dots or spaces (GPS format)
-    # e.g., "85890.00000 00000.000003 00000.000003 0 00000000000000"
+    # GPS linha digitável format: "85810000001-3 78310270116-1 30001197519-8 95742026033-2"
+    # Pattern: 4 groups of digits-digit separated by spaces
     linha_patterns = [
-        r"(\d{5}\.?\d{5}\s+\d{5}\.?\d{6}\s+\d{5}\.?\d{6}\s+\d\s+\d{14})",  # Standard GPS format
-        r"Linha\s*Digit[áa]vel[:\s]*([0-9\s.]+)",  # After label
-        r"(\d[\d\s.]{40,55})",  # Any long digit string
+        r"(\d{11}-\d\s+\d{11}-\d\s+\d{11}-\d\s+\d{11}-\d)",  # GPS format with dashes
+        r"(\d{12}\s+\d{12}\s+\d{12}\s+\d{12})",  # GPS format without dashes
+        r"(\d{5}\.?\d{5}\s+\d{5}\.?\d{6}\s+\d{5}\.?\d{6}\s+\d\s+\d{14})",  # Standard boleto
+        r"Linha\s*Digit[áa]vel[:\s]*([0-9\s.\-]+)",  # After label
+        r"(\d[\d\s.\-]{40,60}\d)",  # Any long digit string with separators
     ]
     for pattern in linha_patterns:
         match = re.search(pattern, page_text, re.IGNORECASE)
@@ -437,11 +523,29 @@ def extract_boleto_info(page: Page) -> Optional[dict]:
             linha = match.group(1).strip()
             break
 
-    # Try to find valor
+    # If text extraction failed, try reading specific elements
+    if not linha:
+        try:
+            # The linha digitável might be in a specific container
+            # Try to find elements containing digit patterns
+            all_elements = page.locator("span, div, p, td")
+            for i in range(min(all_elements.count(), 100)):
+                el_text = all_elements.nth(i).text_content() or ""
+                for pattern in linha_patterns:
+                    match = re.search(pattern, el_text)
+                    if match:
+                        linha = match.group(1).strip()
+                        break
+                if linha:
+                    break
+        except Exception as e:
+            print(f"[GPS] Element scan error: {e}")
+
+    # Extract valor
     valor_patterns = [
-        r"[Vv]alor[:\s]*R?\$?\s*([\d.,]+)",
-        r"R\$\s*([\d.,]+)",
         r"Total[:\s]*R?\$?\s*([\d.,]+)",
+        r"R\$\s*([\d.,]+)",
+        r"[Vv]alor[:\s]*R?\$?\s*([\d.,]+)",
     ]
     for pattern in valor_patterns:
         match = re.search(pattern, page_text)
@@ -449,11 +553,10 @@ def extract_boleto_info(page: Page) -> Optional[dict]:
             valor = match.group(1).strip()
             break
 
-    # Try to find vencimento
+    # Extract vencimento
     venc_patterns = [
         r"[Vv]encimento[:\s]*(\d{2}/\d{2}/\d{4})",
         r"[Dd]ata\s*de\s*[Vv]encimento[:\s]*(\d{2}/\d{2}/\d{4})",
-        r"(\d{2}/\d{2}/\d{4})",  # Any date
     ]
     for pattern in venc_patterns:
         match = re.search(pattern, page_text)
@@ -462,8 +565,7 @@ def extract_boleto_info(page: Page) -> Optional[dict]:
             break
 
     if not linha:
-        # Last resort: dump page text for debugging
-        print(f"[GPS] Page text (first 2000 chars): {page_text[:2000]}")
+        print(f"[GPS] Could not find linha digitável in page text")
         return None
 
     return {
@@ -489,10 +591,20 @@ def main():
     parser = argparse.ArgumentParser(description="GPS Boleto Generator")
     parser.add_argument("--competencia", type=str, help="Competência in MM/YYYY format (default: previous month)")
     parser.add_argument("--person", type=str, help="Generate for one person only: 'fernanda' or 'max'")
+    parser.add_argument("--local", action="store_true", help="Use local Chrome (CDP on localhost:9222) instead of Browserbase")
+    parser.add_argument("--cdp-url", type=str, default="http://localhost:9222", help="CDP URL for --local mode (default: http://localhost:9222)")
+    parser.add_argument("--no-telegram", action="store_true", help="Skip Telegram notifications (for local testing)")
     args = parser.parse_args()
 
     competencia = args.competencia or get_competencia()
     print(f"[GPS] Competência: {competencia}")
+
+    # Override send_telegram if --no-telegram
+    if args.no_telegram:
+        global send_telegram
+        _orig_send = send_telegram
+        def send_telegram(msg):
+            print(f"[TG-SKIP] {msg}")
 
     # Filter to specific person if requested
     people = CONTRIBUTORS
@@ -502,36 +614,42 @@ def main():
             print(f"[GPS] Unknown person: {args.person}")
             sys.exit(1)
 
-    # Step 1: Create Browserbase session
-    try:
-        session = create_browserbase_session()
-    except Exception as e:
-        msg = f"Falha ao criar sessão Browserbase: {e}"
-        print(f"[GPS] {msg}")
-        send_telegram(f"GPS Boleto falhou: {msg}")
-        sys.exit(1)
+    if args.local:
+        # Local Chrome mode — connect to existing Chrome with CDP
+        connect_url = args.cdp_url
+        live_view_url = "(local Chrome — visible on your desktop)"
+        print(f"[GPS] Local mode: connecting to {connect_url}")
+    else:
+        # Browserbase mode
+        try:
+            session = create_browserbase_session()
+        except Exception as e:
+            msg = f"Falha ao criar sessão Browserbase: {e}"
+            print(f"[GPS] {msg}")
+            send_telegram(f"GPS Boleto falhou: {msg}")
+            sys.exit(1)
 
-    live_view_url = session["liveViewUrl"]
-    connect_url = session["connectUrl"]
+        live_view_url = session["liveViewUrl"]
+        connect_url = session["connectUrl"]
 
-    if not connect_url:
-        msg = "Browserbase session created but no connectUrl returned"
-        print(f"[GPS] {msg}")
-        send_telegram(f"GPS Boleto falhou: {msg}")
-        sys.exit(1)
+        if not connect_url:
+            msg = "Browserbase session created but no connectUrl returned"
+            print(f"[GPS] {msg}")
+            send_telegram(f"GPS Boleto falhou: {msg}")
+            sys.exit(1)
 
-    # Step 2: Notify Fernanda
-    send_telegram(
-        f"GPS Boleto — competência *{competencia}*\n\n"
-        f"Sessão Browserbase criada! Live view:\n{live_view_url}\n\n"
-        f"Abra este link para resolver o CAPTCHA quando aparecer."
-    )
+        # Notify Fernanda
+        send_telegram(
+            f"GPS Boleto — competência *{competencia}*\n\n"
+            f"Sessão Browserbase criada! Live view:\n{live_view_url}\n\n"
+            f"Abra este link para resolver o CAPTCHA quando aparecer."
+        )
 
-    # Step 3: Connect Playwright to Browserbase
+    # Connect Playwright
     results = []
     try:
         with sync_playwright() as pw:
-            print(f"[GPS] Connecting to Browserbase: {connect_url[:80]}...")
+            print(f"[GPS] Connecting to: {connect_url[:80]}...")
             browser = pw.chromium.connect_over_cdp(connect_url, timeout=30000)
             context = browser.contexts[0] if browser.contexts else browser.new_context()
             page = context.pages[0] if context.pages else context.new_page()
@@ -563,7 +681,7 @@ def main():
             browser.close()
 
     except Exception as e:
-        msg = f"Playwright/Browserbase connection failed: {e}"
+        msg = f"Playwright connection failed: {e}"
         print(f"[GPS] {msg}")
         traceback.print_exc()
         send_telegram(f"GPS Boleto falhou: {msg}")
