@@ -17,7 +17,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
  # Install Python Playwright for claim_filer.py
- RUN pip install --break-system-packages playwright
+ RUN pip install --break-system-packages playwright requests PyMuPDF
 
  RUN npm install -g openclaw@2026.3.13 clawhub@latest
 

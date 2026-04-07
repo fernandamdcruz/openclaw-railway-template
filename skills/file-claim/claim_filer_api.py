@@ -38,12 +38,11 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-# Try to import requests, install if missing
 try:
     import requests
 except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "requests", "--break-system-packages", "-q"])
-    import requests
+    print("[FATAL] 'requests' not installed. Fix the Dockerfile: pip install --break-system-packages requests")
+    sys.exit(1)
 
 # ============================================================================
 # CONFIGURATION

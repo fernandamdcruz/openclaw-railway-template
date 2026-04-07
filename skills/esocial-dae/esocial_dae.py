@@ -38,20 +38,17 @@ from datetime import datetime, timedelta
 from typing import Optional, Tuple
 import argparse
 
-# Install dependencies if missing
-for pkg in ["requests", "playwright"]:
+_missing = []
+for pkg in ["requests", "playwright", "fitz"]:
     try:
         __import__(pkg)
     except ImportError:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", pkg, "--break-system-packages", "-q"])
+        _missing.append(pkg)
+if _missing:
+    print(f"[FATAL] Missing packages: {', '.join(_missing)}. Fix the Dockerfile.")
+    sys.exit(1)
 
-# PyMuPDF for PDF text extraction
-try:
-    import fitz  # PyMuPDF
-except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "PyMuPDF", "--break-system-packages", "-q"])
-    import fitz
-
+import fitz  # PyMuPDF
 import requests
 from playwright.sync_api import sync_playwright, Page, Browser
 
