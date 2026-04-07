@@ -438,15 +438,20 @@ async def obtain_oauth_token() -> Optional[str]:
             page_text = await page.text_content("body") or ""
 
             if "verification" in page_text.lower() or "code" in page_text.lower() or "factor" in page_text.lower():
-                print("[AUTH] 2FA detected — asking user for code via Telegram")
+                print("[AUTH] 2FA detected — trying auto-extraction from Gmail first")
+                await _screenshot(page, "06_2fa_prompt")
 
-                # Ask the user directly via Telegram (most reliable)
-                code = ask_telegram_for_2fa()
-
-                # Fallback: try Gmail auto-extraction if Telegram ask failed
-                if not code and get_2fa_code_from_gmail:
-                    print("[AUTH] No code from Telegram, trying Gmail auto-extraction")
+                # Try Gmail auto-extraction first (no user interaction needed)
+                code = None
+                if get_2fa_code_from_gmail:
                     code = get_2fa_code_from_gmail(login_epoch)
+                    if code:
+                        print(f"[AUTH] Got 2FA code from Gmail: ****{code[-2:]}")
+
+                # Fallback: ask user via Telegram if Gmail extraction failed
+                if not code:
+                    print("[AUTH] Gmail auto-extraction failed — asking user via Telegram")
+                    code = ask_telegram_for_2fa()
 
                 if code:
                     print(f"[AUTH] Got 2FA code: ****{code[-2:]}")
