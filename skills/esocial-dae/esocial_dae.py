@@ -11,8 +11,9 @@ Flow:
   2. Navigate to eSocial login → click "Entrar com gov.br"
   3. Send live view URL to Fernanda → she logs into gov.br
   4. Poll until logged in (URL leaves sso.acesso.gov.br)
-  5. Navigate to DAE generation → select competência → emit DAE
-  6. Extract linha digitável / código de barras → send via Telegram
+  5. Navigate to Folha de Pagamento → select month → click "Emitir Guia"
+  6. Download DAE PDF via HTTP with session cookies → parse with PyMuPDF
+  7. Extract linha digitável, valor, vencimento → send via Telegram
 
 Usage:
   python3 esocial_dae.py                         # auto-detects previous month
@@ -44,6 +45,13 @@ for pkg in ["requests", "playwright"]:
     except ImportError:
         subprocess.check_call([sys.executable, "-m", "pip", "install", pkg, "--break-system-packages", "-q"])
 
+# PyMuPDF for PDF text extraction
+try:
+    import fitz  # PyMuPDF
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "PyMuPDF", "--break-system-packages", "-q"])
+    import fitz
+
 import requests
 from playwright.sync_api import sync_playwright, Page, Browser
 
@@ -51,15 +59,24 @@ from playwright.sync_api import sync_playwright, Page, Browser
 # CONFIGURATION
 # ============================================================================
 
-SCRIPT_VERSION = "esocial-v1-2026-04-07"
+SCRIPT_VERSION = "esocial-v2-2026-04-07"
 print(f"[INIT] eSocial DAE Generator {SCRIPT_VERSION} at {datetime.now().isoformat()}")
 
 ESOCIAL_LOGIN_URL = "https://login.esocial.gov.br/login.aspx"
+ESOCIAL_FOLHA_URL = "https://www.esocial.gov.br/portal/FolhaPagamento/Listagem/ListarPagamentos"
+ESOCIAL_EMIT_URL = "https://www.esocial.gov.br/portal/FolhaPagamento/EmitirGuia/EmitirGuiaMensal"
 
 TELEGRAM_CHAT_ID = "8409634074"
 
 LOGIN_TIMEOUT = 300  # 5 minutes for Fernanda to log in
 LOGIN_POLL_INTERVAL = 5  # Check every 5 seconds
+
+# Month name mapping for eSocial UI tabs
+MONTH_NAMES = {
+    "01": "Jan", "02": "Fev", "03": "Mar", "04": "Abr",
+    "05": "Mai", "06": "Jun", "07": "Jul", "08": "Ago",
+    "09": "Set", "10": "Out", "11": "Nov", "12": "Dez",
+}
 
 
 # ============================================================================
@@ -187,20 +204,11 @@ def wait_for_govbr_login(page: Page, live_view_url: str) -> bool:
     start = time.time()
     while time.time() - start < LOGIN_TIMEOUT:
         current_url = page.url
-        # Once logged in, URL will leave sso.acesso.gov.br
+        # Once logged in, URL leaves sso.acesso.gov.br and login.esocial
         if "sso.acesso.gov.br" not in current_url and "login.esocial" not in current_url:
             print(f"[LOGIN] Login detected! URL: {current_url}")
             send_telegram("Login no gov.br concluído! Continuando com a DAE...")
             return True
-        # Also check if we're back on eSocial with a logged-in indicator
-        try:
-            # Look for any eSocial dashboard content that only shows when logged in
-            if "esocial.gov.br" in current_url and "login" not in current_url:
-                print(f"[LOGIN] Logged in — on eSocial dashboard: {current_url}")
-                send_telegram("Login no gov.br concluído! Continuando com a DAE...")
-                return True
-        except Exception:
-            pass
         time.sleep(LOGIN_POLL_INTERVAL)
 
     print("[LOGIN] Timed out waiting for gov.br login")
@@ -214,10 +222,19 @@ def wait_for_govbr_login(page: Page, live_view_url: str) -> bool:
 
 def generate_dae(page: Page, competencia: str, live_view_url: str) -> Optional[dict]:
     """
-    Generate a DAE after login. Returns dict with linha_digitavel, valor, vencimento
-    or None on failure.
+    Generate a DAE for the given competência.
+    Returns dict with linha_digitavel, valor, vencimento or None on failure.
     """
-    print(f"\n[DAE] === Starting DAE generation for competência {competencia} ===")
+    # Parse competencia MM/YYYY
+    parts = competencia.split("/")
+    if len(parts) != 2:
+        print(f"[DAE] Invalid competência format: {competencia}")
+        return None
+    month_str, year_str = parts[0], parts[1]
+    comp_yyyymm = f"{year_str}{month_str}"  # e.g. "202603"
+    month_tab = MONTH_NAMES.get(month_str, "")
+
+    print(f"\n[DAE] === Starting DAE generation for {competencia} (tab: {month_tab}, code: {comp_yyyymm}) ===")
 
     # Step 1: Navigate to eSocial login
     print("[DAE] Navigating to eSocial...")
@@ -233,190 +250,88 @@ def generate_dae(page: Page, competencia: str, live_view_url: str) -> Optional[d
         page.screenshot(path="/tmp/esocial_02_govbr.png")
         print(f"[DAE] On gov.br login page: {page.url}")
     except Exception as e:
-        print(f"[DAE] Could not click gov.br login: {e}")
-        page.screenshot(path="/tmp/esocial_err_govbr_click.png")
-        return None
+        # Maybe already logged in (session still valid)
+        if "esocial.gov.br" in page.url and "login" not in page.url:
+            print(f"[DAE] Already logged in! URL: {page.url}")
+        else:
+            print(f"[DAE] Could not click gov.br login: {e}")
+            page.screenshot(path="/tmp/esocial_err_govbr.png")
+            return None
 
-    # Step 3: Wait for Fernanda to log in
-    print("[DAE] Waiting for gov.br authentication...")
-    if not wait_for_govbr_login(page, live_view_url):
-        return None
+    # Step 3: Wait for login (or skip if already logged in)
+    if "sso.acesso.gov.br" in page.url or "login.esocial" in page.url:
+        print("[DAE] Waiting for gov.br authentication...")
+        if not wait_for_govbr_login(page, live_view_url):
+            return None
 
     time.sleep(3)
     page.screenshot(path="/tmp/esocial_03_logged_in.png")
     print(f"[DAE] Logged in. URL: {page.url}")
 
-    # Step 4: Navigate to Empregador Doméstico module
-    print("[DAE] Looking for Empregador Doméstico...")
+    # Step 4: Navigate to Folha de Pagamento page
+    # After login, we land on the eSocial dashboard (Empregador Doméstico)
+    # Go directly to the Folha de Pagamento listing
+    print("[DAE] Navigating to Folha de Pagamento...")
+    page.goto(ESOCIAL_FOLHA_URL, wait_until="domcontentloaded", timeout=30000)
+    time.sleep(3)
+    page.screenshot(path="/tmp/esocial_04_folha.png")
+    print(f"[DAE] Folha page URL: {page.url}")
+
+    # Step 5: Select year tab if needed
+    print(f"[DAE] Selecting year {year_str}...")
     try:
-        # The eSocial dashboard may show different modules
-        # Try clicking "Empregador Doméstico" or the simplified module
-        emp_domestico = page.get_by_text("Empregador Doméstico", exact=False)
-        if emp_domestico.count() > 0:
-            emp_domestico.first.click()
-            time.sleep(3)
-            print("[DAE] Clicked Empregador Doméstico")
-        else:
-            # May already be on the right page, or need "Módulo Simplificado"
-            modulo = page.get_by_text("Módulo Simplificado", exact=False)
-            if modulo.count() > 0:
-                modulo.first.click()
-                time.sleep(3)
-                print("[DAE] Clicked Módulo Simplificado")
+        year_tab = page.get_by_text(year_str, exact=True)
+        if year_tab.count() > 0 and year_tab.first.is_visible():
+            year_tab.first.click()
+            time.sleep(2)
+            print(f"[DAE] Year {year_str} selected")
     except Exception as e:
-        print(f"[DAE] Module navigation note: {e}")
+        print(f"[DAE] Year tab note: {e}")
 
-    page.screenshot(path="/tmp/esocial_04_module.png")
-    print(f"[DAE] Module page URL: {page.url}")
+    # Step 6: Select month tab
+    print(f"[DAE] Selecting month {month_tab}...")
+    try:
+        month_btn = page.get_by_text(month_tab, exact=True)
+        if month_btn.count() > 0 and month_btn.first.is_visible():
+            month_btn.first.click()
+            time.sleep(2)
+            print(f"[DAE] Month {month_tab} selected")
+    except Exception as e:
+        print(f"[DAE] Month tab note: {e}")
 
-    # Step 5: Navigate to DAE generation
-    # Look for "Emitir DAE", "Emitir Guia", "Folha/Recebimentos", etc.
-    print("[DAE] Looking for DAE generation page...")
-    dae_found = False
-    dae_link_texts = [
-        "Emitir DAE",
-        "Emitir Guia",
-        "DAE",
-        "Folha de Pagamento",
-        "Recebimentos e Pagamentos",
-    ]
-    for link_text in dae_link_texts:
-        try:
-            link = page.get_by_text(link_text, exact=False)
-            if link.count() > 0 and link.first.is_visible():
-                link.first.click()
-                time.sleep(3)
-                print(f"[DAE] Clicked: {link_text}")
-                dae_found = True
-                break
-        except Exception:
-            continue
+    page.screenshot(path="/tmp/esocial_05_month_selected.png")
 
-    if not dae_found:
-        print("[DAE] Could not find DAE link — dumping page for debugging")
-        page.screenshot(path="/tmp/esocial_err_no_dae_link.png")
-        # Try to get all visible links/buttons
-        try:
-            links = page.locator("a, button")
-            for i in range(min(links.count(), 30)):
-                txt = links.nth(i).text_content() or ""
-                if txt.strip():
-                    print(f"[DAE]   link/button: {txt.strip()[:80]}")
-        except Exception:
-            pass
-        send_telegram(
-            "Não encontrei o link para emitir DAE no eSocial. "
-            "Verifique os screenshots em /tmp/esocial_*.png"
-        )
-        return None
+    # Step 7: Click "Emitir Guia" button
+    print("[DAE] Clicking 'Emitir Guia'...")
+    try:
+        emitir = page.get_by_text("Emitir Guia", exact=True)
+        emitir.click(timeout=5000)
+        time.sleep(5)
+        print(f"[DAE] Emitir Guia clicked — PDF should be loading")
+    except Exception as e:
+        print(f"[DAE] Emitir Guia error: {e}")
+        page.screenshot(path="/tmp/esocial_err_emitir.png")
+        # Try the direct URL as fallback
+        print(f"[DAE] Trying direct URL: {ESOCIAL_EMIT_URL}?competencia={comp_yyyymm}")
+        page.goto(f"{ESOCIAL_EMIT_URL}?competencia={comp_yyyymm}", wait_until="domcontentloaded", timeout=30000)
+        time.sleep(5)
 
-    page.screenshot(path="/tmp/esocial_05_dae_page.png")
+    page.screenshot(path="/tmp/esocial_06_dae_pdf.png")
     print(f"[DAE] DAE page URL: {page.url}")
 
-    # Step 6: Select competência
-    print(f"[DAE] Looking for competência selector ({competencia})...")
-    try:
-        # eSocial typically has a month/year selector or a list of competências
-        # Try different selector strategies
-        comp_selected = False
-
-        # Strategy 1: Look for a select/dropdown with month options
-        selects = page.locator("select")
-        for i in range(selects.count()):
-            sel = selects.nth(i)
-            if sel.is_visible():
-                options_text = sel.inner_text()
-                if competencia in options_text or "Competência" in options_text:
-                    sel.select_option(label=competencia)
-                    comp_selected = True
-                    print(f"[DAE] Selected competência via dropdown")
-                    break
-
-        # Strategy 2: Look for a clickable month in a list/table
-        if not comp_selected:
-            comp_link = page.get_by_text(competencia, exact=False)
-            if comp_link.count() > 0:
-                comp_link.first.click()
-                comp_selected = True
-                print(f"[DAE] Clicked competência text")
-
-        # Strategy 3: Input field
-        if not comp_selected:
-            comp_input = page.locator("input[placeholder*='ompet'], input[placeholder*='mm'], input[name*='ompet']")
-            if comp_input.count() > 0 and comp_input.first.is_visible():
-                comp_input.first.fill(competencia)
-                comp_selected = True
-                print(f"[DAE] Filled competência input")
-
-        if not comp_selected:
-            print(f"[DAE] Could not find competência selector — continuing anyway")
-
-        time.sleep(2)
-    except Exception as e:
-        print(f"[DAE] Competência selection error: {e}")
-
-    page.screenshot(path="/tmp/esocial_06_competencia.png")
-
-    # Step 7: Click to generate/emit DAE
-    print("[DAE] Looking for emit/generate button...")
-    emit_found = False
-    emit_texts = [
-        "Emitir DAE",
-        "Emitir",
-        "Gerar DAE",
-        "Gerar Guia",
-        "Emitir Guia",
-        "Confirmar",
-    ]
-    for txt in emit_texts:
-        try:
-            btn = page.get_by_text(txt, exact=True)
-            if btn.count() > 0 and btn.first.is_visible():
-                btn.first.click()
-                time.sleep(5)
-                print(f"[DAE] Clicked: {txt}")
-                emit_found = True
-                break
-        except Exception:
-            continue
-
-    if not emit_found:
-        # Try any button with "emitir" or "gerar" in it
-        try:
-            btn = page.locator("button, a, input[type='button'], input[type='submit']")
-            for i in range(min(btn.count(), 30)):
-                txt = (btn.nth(i).text_content() or "").strip().lower()
-                if any(kw in txt for kw in ["emitir", "gerar", "guia", "dae"]):
-                    btn.nth(i).click()
-                    time.sleep(5)
-                    print(f"[DAE] Clicked button: {txt}")
-                    emit_found = True
-                    break
-        except Exception:
-            pass
-
-    page.screenshot(path="/tmp/esocial_07_after_emit.png")
-
-    if not emit_found:
-        print("[DAE] Could not find emit button")
-        send_telegram(
-            "Não encontrei o botão para emitir DAE. "
-            "Verifique os screenshots em /tmp/esocial_*.png"
-        )
-        return None
-
-    # Step 8: Extract DAE info (linha digitável, valor, vencimento)
-    print("[DAE] Extracting DAE info...")
-    time.sleep(3)
-    page.screenshot(path="/tmp/esocial_08_dae_result.png")
-
-    result = extract_dae_info(page)
+    # Step 8: Download the DAE PDF and extract info
+    # The DAE is rendered as a PDF in Chrome's built-in viewer.
+    # Chrome's PDF viewer doesn't expose text to Playwright.
+    # We download the PDF via HTTP using the browser's session cookies,
+    # then parse it with PyMuPDF to extract the linha digitável.
+    print("[DAE] Downloading DAE PDF via HTTP...")
+    result = download_and_parse_dae_pdf(page, comp_yyyymm)
 
     if result:
-        print(f"[DAE] DAE generated: {result}")
-        page.screenshot(path="/tmp/esocial_09_done.png")
+        print(f"[DAE] DAE extracted: {result}")
+        page.screenshot(path="/tmp/esocial_07_done.png")
     else:
-        print("[DAE] Could not extract DAE info")
+        print("[DAE] Could not extract DAE info from PDF")
         page.screenshot(path="/tmp/esocial_err_extract.png")
         send_telegram(
             "Não consegui extrair as informações da DAE. "
@@ -426,95 +341,128 @@ def generate_dae(page: Page, competencia: str, live_view_url: str) -> Optional[d
     return result
 
 
-def extract_dae_info(page: Page) -> Optional[dict]:
-    """Extract linha digitável, valor, and vencimento from the DAE page."""
-    # Try multiple methods to get page text (Angular/React apps can be tricky)
-    page_text = ""
+def download_and_parse_dae_pdf(page: Page, comp_yyyymm: str) -> Optional[dict]:
+    """
+    Download the DAE PDF using the browser's cookies and parse it with PyMuPDF.
+    The PDF URL is: EmitirGuiaMensal?competencia=YYYYMM
+    """
+    # Get cookies from the browser via CDP
     try:
-        page_text = page.inner_text("body") or ""
-    except Exception:
-        pass
-    if len(page_text.strip()) < 20:
+        client = page.context.new_cdp_session(page)
+        result = client.send("Network.getCookies", {"urls": ["https://www.esocial.gov.br"]})
+        cookies = result.get("cookies", [])
+        cookie_header = "; ".join(f'{c["name"]}={c["value"]}' for c in cookies)
+        print(f"[DAE] Got {len(cookies)} cookies from browser")
+    except Exception as e:
+        print(f"[DAE] Could not get cookies via CDP: {e}")
+        # Fallback: get cookies from Playwright context
         try:
-            page_text = page.text_content("body") or ""
-        except Exception:
-            pass
-    if len(page_text.strip()) < 20:
-        try:
-            texts = page.locator("*").all_text_contents()
-            page_text = " ".join(t.strip() for t in texts if t.strip())
-        except Exception:
-            pass
+            cookies = page.context.cookies()
+            cookie_header = "; ".join(
+                f'{c["name"]}={c["value"]}' for c in cookies
+                if "esocial" in c.get("domain", "")
+            )
+            print(f"[DAE] Got cookies via Playwright context")
+        except Exception as e2:
+            print(f"[DAE] Could not get cookies at all: {e2}")
+            return None
 
-    print(f"[DAE] Extracted {len(page_text)} chars of page text")
-    print(f"[DAE] Page text (first 1000 chars): {page_text[:1000]}")
+    # Download the PDF
+    pdf_url = f"{ESOCIAL_EMIT_URL}?competencia={comp_yyyymm}"
+    print(f"[DAE] Downloading: {pdf_url}")
+    try:
+        resp = requests.get(
+            pdf_url,
+            headers={
+                "Cookie": cookie_header,
+                "Accept": "application/pdf",
+            },
+            timeout=30,
+        )
+        ct = resp.headers.get("content-type", "")
+        print(f"[DAE] Response: {resp.status_code}, Content-Type: {ct}, Size: {len(resp.content)}")
+
+        if resp.status_code != 200:
+            print(f"[DAE] HTTP error downloading PDF")
+            return None
+
+        if not ("pdf" in ct.lower() or resp.content[:4] == b"%PDF"):
+            print(f"[DAE] Response is not a PDF: {resp.content[:200]}")
+            return None
+
+    except Exception as e:
+        print(f"[DAE] PDF download error: {e}")
+        return None
+
+    # Save PDF locally
+    pdf_path = f"/tmp/esocial_dae_{comp_yyyymm}.pdf"
+    with open(pdf_path, "wb") as f:
+        f.write(resp.content)
+    print(f"[DAE] PDF saved: {pdf_path} ({len(resp.content)} bytes)")
+
+    # Parse with PyMuPDF
+    return extract_dae_from_pdf(pdf_path)
+
+
+def extract_dae_from_pdf(pdf_path: str) -> Optional[dict]:
+    """Extract linha digitável, valor, and vencimento from a DAE PDF file."""
+    try:
+        doc = fitz.open(pdf_path)
+        full_text = ""
+        for pg in doc:
+            full_text += pg.get_text() + "\n"
+        doc.close()
+    except Exception as e:
+        print(f"[DAE] PDF parse error: {e}")
+        return None
+
+    print(f"[DAE] PDF text ({len(full_text)} chars):")
+    print(full_text[:1500])
 
     linha = None
     valor = None
     vencimento = None
 
-    # DAE linha digitável / código de barras patterns
+    # DAE linha digitável: "85850000015 0 49270432261 4 10071626097 9 32317340917 0"
+    # Pattern: 4 groups of (11 digits + space + 1 digit)
     linha_patterns = [
-        r"(\d{11}-\d\s+\d{11}-\d\s+\d{11}-\d\s+\d{11}-\d)",  # GPS-like with dashes
-        r"(\d{12}\s+\d{12}\s+\d{12}\s+\d{12})",  # 4x12 digits
-        r"(\d{5}\.\d{5}\s+\d{5}\.\d{6}\s+\d{5}\.\d{6}\s+\d\s+\d{14})",  # Standard boleto
-        r"[Ll]inha\s*[Dd]igit[áa]vel[:\s]*([0-9\s.\-]+)",  # After label
-        r"[Cc][óo]digo\s*de\s*[Bb]arras[:\s]*([0-9\s.\-]+)",  # After "Código de Barras"
-        r"(\d[\d\s.\-]{40,60}\d)",  # Any long digit string
+        r"(\d{11}\s+\d\s+\d{11}\s+\d\s+\d{11}\s+\d\s+\d{11}\s+\d)",  # DAE format (space-separated)
+        r"(\d{11}-\d\s+\d{11}-\d\s+\d{11}-\d\s+\d{11}-\d)",  # With dashes
+        r"(\d{12}\s+\d{12}\s+\d{12}\s+\d{12})",  # No separators within groups
     ]
     for pattern in linha_patterns:
-        match = re.search(pattern, page_text, re.IGNORECASE)
+        match = re.search(pattern, full_text)
         if match:
             linha = match.group(1).strip()
+            # Normalize: collapse multiple spaces, keep the groups clear
+            linha = re.sub(r"\s+", " ", linha)
             break
 
-    # If text extraction didn't find it, scan individual elements
-    if not linha:
-        try:
-            all_elements = page.locator("span, div, p, td, input")
-            for i in range(min(all_elements.count(), 150)):
-                el_text = all_elements.nth(i).text_content() or ""
-                # Also check input values (some portals put the code in an input)
-                if not el_text.strip():
-                    try:
-                        el_text = all_elements.nth(i).input_value() or ""
-                    except Exception:
-                        pass
-                for pattern in linha_patterns:
-                    match = re.search(pattern, el_text)
-                    if match:
-                        linha = match.group(1).strip()
-                        break
-                if linha:
-                    break
-        except Exception as e:
-            print(f"[DAE] Element scan error: {e}")
-
-    # Extract valor
+    # Extract valor from "Valor Total do Documento\n1.549,27" or "Valor:\n1.549,27"
     valor_patterns = [
-        r"Total[:\s]*R?\$?\s*([\d.,]+)",
-        r"[Vv]alor[:\s]*R?\$?\s*([\d.,]+)",
-        r"R\$\s*([\d.,]+)",
+        r"Valor\s*Total[^0-9]*([\d.,]+)",
+        r"Valor[:\s]*([\d.,]+)",
+        r"Totais\s*([\d.,]+)",
     ]
     for pattern in valor_patterns:
-        match = re.search(pattern, page_text)
+        match = re.search(pattern, full_text)
         if match:
             valor = match.group(1).strip()
             break
 
-    # Extract vencimento
+    # Extract vencimento from "Data de Vencimento\n20/04/2026" or "Pagar até:\n20/04/2026"
     venc_patterns = [
-        r"[Vv]encimento[:\s]*(\d{2}/\d{2}/\d{4})",
-        r"[Dd]ata\s*de\s*[Vv]encimento[:\s]*(\d{2}/\d{2}/\d{4})",
+        r"Vencimento\s*(\d{2}/\d{2}/\d{4})",
+        r"Pagar\s*(?:este documento )?at[ée][:\s]*(\d{2}/\d{2}/\d{4})",
     ]
     for pattern in venc_patterns:
-        match = re.search(pattern, page_text)
+        match = re.search(pattern, full_text)
         if match:
             vencimento = match.group(1).strip()
             break
 
     if not linha:
-        print("[DAE] Could not find linha digitável in page text")
+        print("[DAE] Could not find linha digitável in PDF text")
         return None
 
     return {
