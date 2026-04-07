@@ -4,8 +4,8 @@ BCBS Global Solutions — Direct API Claim Filer
 ================================================
 Files medical claims via the BCBS/GeoBlue REST API (claimsapire.hthworldwide.com).
 
-NO browser automation, NO Playwright, NO Okta login, NO 2FA.
-The claims API has no authentication — it uses UserID in the request body.
+Uses Playwright to log in via Okta SSO (with 2FA) to obtain an OAuth token,
+then files claims via authenticated REST API calls.
 
 API Flow:
   1. POST /v4/claimants/save/       → Create claim + set patient (returns ClaimSubmissionID)
@@ -332,6 +332,29 @@ async def obtain_oauth_token() -> Optional[str]:
                 print(f"[AUTH] Captured OAuth authorization code from callback (length: {len(code)})")
 
     print("[AUTH] Starting Playwright login to obtain OAuth token...")
+    screenshot_dir = "/tmp/bcbs_auth_screenshots"
+    os.makedirs(screenshot_dir, exist_ok=True)
+
+    async def _screenshot(page, name):
+        """Save a debug screenshot and log the path."""
+        path = f"{screenshot_dir}/{name}_{datetime.now().strftime('%H%M%S')}.png"
+        try:
+            await page.screenshot(path=path)
+            print(f"[AUTH] Screenshot saved: {path}")
+        except Exception as e:
+            print(f"[AUTH] Screenshot failed: {e}")
+
+    async def _dump_page_state(page, label):
+        """Log current URL, title, and visible text for debugging."""
+        try:
+            url = page.url
+            title = await page.title()
+            text = (await page.text_content("body") or "")[:500]
+            print(f"[AUTH] [{label}] URL: {url}")
+            print(f"[AUTH] [{label}] Title: {title}")
+            print(f"[AUTH] [{label}] Body text (first 500 chars): {text}")
+        except Exception as e:
+            print(f"[AUTH] [{label}] Could not dump page state: {e}")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
@@ -348,13 +371,41 @@ async def obtain_oauth_token() -> Optional[str]:
             print(f"[AUTH] Navigating to {portal_url}")
             await page.goto(portal_url, wait_until="networkidle", timeout=30000)
             await asyncio.sleep(5)
+            await _dump_page_state(page, "after-landing")
+            await _screenshot(page, "01_landing")
 
             # Click Login button (Flutter landing page)
             login_btn = page.get_by_role("button", name=re.compile("^login$", re.IGNORECASE))
-            if await login_btn.count() > 0:
+            btn_count = await login_btn.count()
+            if btn_count > 0:
                 await login_btn.click()
                 await asyncio.sleep(5)
-                print(f"[AUTH] Redirected to: {page.url}")
+                print(f"[AUTH] Clicked Login button, redirected to: {page.url}")
+            else:
+                # Try alternative selectors — the login element may not be a button
+                print(f"[AUTH] No 'Login' button found (count=0). Trying alternative selectors...")
+                alt_selectors = [
+                    page.get_by_role("link", name=re.compile("login|sign.in|log.in", re.IGNORECASE)),
+                    page.locator("a[href*='login'], a[href*='signin'], a[href*='auth']"),
+                    page.locator("text=/login/i"),
+                ]
+                clicked = False
+                for i, alt in enumerate(alt_selectors):
+                    alt_count = await alt.count()
+                    print(f"[AUTH]   Alternative selector {i}: found {alt_count} match(es)")
+                    if alt_count > 0:
+                        await alt.first.click()
+                        await asyncio.sleep(5)
+                        print(f"[AUTH]   Clicked alternative selector {i}, now at: {page.url}")
+                        clicked = True
+                        break
+                if not clicked:
+                    print("[AUTH] WARNING: Could not find any login button/link on landing page")
+                    await _dump_page_state(page, "no-login-btn")
+                    await _screenshot(page, "02_no_login_btn")
+
+            await _dump_page_state(page, "before-username")
+            await _screenshot(page, "03_before_username")
 
             # Fill username
             username_input = page.locator('input[name="identifier"]')
@@ -367,14 +418,20 @@ async def obtain_oauth_token() -> Optional[str]:
             await password_input.wait_for(state="visible", timeout=5000)
             await password_input.fill(password)
             print("[AUTH] Password entered")
+            await _screenshot(page, "04_credentials_filled")
 
             # Submit login
             import time as _time
             login_epoch = int(_time.time())
             submit_btn = page.locator('input[type="submit"][value="SIGN IN"]')
+            if await submit_btn.count() == 0:
+                print("[AUTH] WARNING: 'SIGN IN' submit button not found, trying generic submit")
+                submit_btn = page.locator('input[type="submit"]')
             await submit_btn.click()
             print(f"[AUTH] SIGN IN clicked (epoch: {login_epoch})")
             await asyncio.sleep(5)
+            await _dump_page_state(page, "after-sign-in")
+            await _screenshot(page, "05_after_sign_in")
 
             # Check for 2FA
             current_url = page.url
@@ -487,6 +544,8 @@ async def obtain_oauth_token() -> Optional[str]:
         except Exception as e:
             print(f"[AUTH] Login error: {e}")
             traceback.print_exc()
+            await _dump_page_state(page, "error")
+            await _screenshot(page, "99_error")
             return None
         finally:
             await browser.close()
