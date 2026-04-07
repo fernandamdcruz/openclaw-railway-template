@@ -37,65 +37,41 @@ When this skill is triggered by the **monthly cron job** (NOT when Fernanda asks
 
 ## Workflow
 
-### Setup — MANDATORY
-- **You MUST use browser profile `browserbase`** (NOT the default `openclaw` profile). This is critical — `browserbase` provides a live view URL that Fernanda needs to log into gov.br.
-- After creating the Browserbase session, get the **live view URL**
-- Send it to Fernanda via Telegram (chat ID: 8409634074):
-  ```
-  eSocial DAE session started! Live view URL: [live view URL]
-  Abra este link para fazer login no gov.br quando eu pedir.
-  ```
-- **Do NOT proceed until you've sent the live view URL.**
+**Do NOT try to use the browser tool directly.** Run the Python script instead:
 
-### Step 1: Navigate to eSocial portal
-- URL: `https://login.esocial.gov.br`
-- This will redirect to gov.br authentication
+```bash
+python3 /data/workspace/skills/esocial-dae/esocial_dae.py
+```
 
-### Step 2: Authentication (requires Fernanda)
-- The gov.br login requires CPF + password or certificate
-- Send Telegram message: "Preciso que você faça login no gov.br pelo live view: [live view URL]"
-- Wait for Fernanda to complete authentication (up to 5 minutes)
-- Once logged in, the portal will redirect to the eSocial dashboard
+Optional flags:
+- `--competencia MM/YYYY` — override the competência (default: previous month)
+- `--local` — use local Chrome instead of Browserbase (for testing)
+- `--no-telegram` — skip Telegram notifications (for testing)
 
-### Step 3: Navigate to DAE generation
-- Look for "Empregador Doméstico" or similar section
-- Navigate to the DAE/payment slip generation page
-- This is typically under: Folha/Recebimentos e Pagamentos → Emitir DAE
+The script handles everything:
+1. Creates a Browserbase session with live view URL
+2. Navigates to eSocial → clicks "Entrar com gov.br"
+3. Sends Fernanda the live view URL via Telegram so she can log in
+4. Polls until she completes gov.br authentication
+5. Navigates to DAE generation → selects competência → emits DAE
+6. Extracts linha digitável / código de barras
+7. Sends result via Telegram
 
-### Step 4: Select competência
-- Select the current month's competência (the month being paid for)
-- Typically the PREVIOUS month — e.g., generating in April = competência March
+## What to report back
 
-### Step 5: Review and generate
-- The system will show the DAE with all domestic workers registered
-- Review the amounts
-- Click to generate/emit the DAE
-- Take a screenshot at each step
-
-### Step 6: Extract payment info
-- Look for "Código de Barras" or "Linha Digitável" — the payment barcode number
-- Also capture: total amount and due date
-- Take a screenshot of the completed DAE
-
-### Step 7: Send via Telegram
-- Send to chat ID 8409634074:
-  ```
-  ✅ eSocial DAE — [MM/YYYY]
-  Linha digitável: [barcode number]
-  Valor: R$ [total amount]
-  Vencimento: [due date]
-  ```
+After the script finishes, tell Fernanda:
+- If successful: share the linha digitável, valor, and vencimento
+- If failed: share the error and mention that screenshots are saved at `/tmp/esocial_*.png`
 
 ## Notes
-- The gov.br portal requires human authentication — Fernanda MUST log in via the live view URL
+- The gov.br portal requires **human authentication** — Fernanda MUST log in via the live view URL
 - Browserbase live view lets her see and interact with the browser session in real-time
-- After authentication, FerdyBot can navigate the remaining steps
-- **Always use browser profile `browserbase`, never `openclaw` for this skill**
-- The eSocial portal structure may vary — take screenshots at each step for debugging
-- If the portal layout changes, coordinates/selectors may need recalibration
+- After authentication, the script automates the remaining steps
+- The eSocial portal structure may change — the script takes screenshots at each step for debugging
+- If the script fails at navigation steps, the screenshots will show exactly where it got stuck
 - Telegram delivery chat ID: 8409634074
 
 ## Important
-- Fernanda needs to provide: employee names, CPF (employer), and any login credentials separately
 - Do NOT store gov.br passwords in Railway env vars or skill files
 - Authentication is always done by Fernanda via the Browserbase live view
+- Do NOT try to automate the gov.br login — it requires human interaction
