@@ -190,21 +190,103 @@ def create_browserbase_session() -> dict:
 # GOV.BR LOGIN HANDLING
 # ============================================================================
 
+def autofill_govbr_credentials(page: Page) -> None:
+    """
+    Auto-fill CPF and password on the gov.br login page if credentials
+    are available in env vars. This saves the user from typing on mobile.
+    After filling, the bot verification challenge will still require
+    human interaction via the live view.
+    """
+    cpf = os.environ.get("GOVBR_CPF", "")
+    password = os.environ.get("GOVBR_PASSWORD", "")
+
+    if not cpf or not password:
+        print("[LOGIN] GOVBR_CPF/GOVBR_PASSWORD not set — user must enter credentials manually")
+        return
+
+    # Step 1: Fill CPF
+    try:
+        cpf_input = page.locator('input[placeholder*="CPF"], input#accountId, input[name*="cpf"]')
+        if cpf_input.count() > 0 and cpf_input.first.is_visible(timeout=5000):
+            cpf_input.first.fill(cpf)
+            print(f"[LOGIN] CPF auto-filled")
+            time.sleep(1)
+
+            # Click Continuar
+            continuar = page.get_by_text("Continuar", exact=True)
+            if continuar.count() > 0:
+                continuar.first.click()
+                time.sleep(3)
+                print("[LOGIN] Clicked Continuar")
+            else:
+                # Try submit button
+                page.locator('input[type="submit"], button[type="submit"]').first.click()
+                time.sleep(3)
+        else:
+            print("[LOGIN] CPF input not found on page")
+            return
+    except Exception as e:
+        print(f"[LOGIN] CPF auto-fill error: {e}")
+        return
+
+    page.screenshot(path="/tmp/esocial_login_after_cpf.png")
+
+    # Step 2: Fill password
+    try:
+        pwd_input = page.locator('input[type="password"]')
+        if pwd_input.count() > 0 and pwd_input.first.is_visible(timeout=5000):
+            pwd_input.first.fill(password)
+            print("[LOGIN] Password auto-filled")
+            time.sleep(1)
+
+            # Click Entrar
+            entrar = page.get_by_text("Entrar", exact=True)
+            if entrar.count() > 0:
+                entrar.first.click()
+                time.sleep(5)
+                print("[LOGIN] Clicked Entrar")
+            else:
+                page.locator('input[type="submit"], button[type="submit"]').first.click()
+                time.sleep(5)
+        else:
+            print("[LOGIN] Password input not found — page may have changed")
+    except Exception as e:
+        print(f"[LOGIN] Password auto-fill error: {e}")
+
+    page.screenshot(path="/tmp/esocial_login_after_password.png")
+    print(f"[LOGIN] After credential submission, URL: {page.url}")
+
+
 def wait_for_govbr_login(page: Page, live_view_url: str) -> bool:
     """
     Wait for Fernanda to complete gov.br authentication via live view.
+    Auto-fills CPF + password if env vars are set, then waits for
+    human verification challenge if needed.
     Returns True if logged in, False if timed out.
     """
+    # Try auto-filling credentials first
+    if "sso.acesso.gov.br" in page.url:
+        autofill_govbr_credentials(page)
+
+    # Check if already through (auto-fill + no verification = instant login)
+    current_url = page.url
+    if "sso.acesso.gov.br" not in current_url and "login.esocial" not in current_url:
+        print(f"[LOGIN] Login completed after auto-fill! URL: {current_url}")
+        send_telegram("Login no gov.br concluído automaticamente! Continuando com a DAE...")
+        return True
+
+    # Still on gov.br — verification challenge likely appeared
+    # Notify Fernanda to handle it via live view
     send_telegram(
-        f"eSocial DAE — preciso que você faça login no gov.br!\n\n"
+        f"eSocial DAE — CPF e senha já preenchidos!\n\n"
+        f"Falta só a verificação de segurança.\n"
         f"Abra o live view:\n{live_view_url}\n\n"
-        f"Faça login com CPF + senha. Tenho 5 minutos."
+        f"Complete a verificação. Tenho 5 minutos."
     )
 
     start = time.time()
     while time.time() - start < LOGIN_TIMEOUT:
         current_url = page.url
-        # Once logged in, URL leaves sso.acesso.gov.br and login.esocial
         if "sso.acesso.gov.br" not in current_url and "login.esocial" not in current_url:
             print(f"[LOGIN] Login detected! URL: {current_url}")
             send_telegram("Login no gov.br concluído! Continuando com a DAE...")
