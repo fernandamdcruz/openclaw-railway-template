@@ -28,11 +28,29 @@ The script handles EVERYTHING internally:
 3. **DO NOT** read or modify the Python source code.
 4. **DO NOT** try to "help" the script by running parts of it manually.
 5. **DO NOT** fall back to manual browser automation if the script fails.
-6. **DO NOT** investigate, analyze, or debug anything yourself. Just run the command and report the output.
+6. **DO NOT** run pip install or install any packages. All dependencies are pre-installed in the Docker image.
+7. **DO NOT** investigate, analyze, or debug anything yourself. Just run the command and report the output.
+8. **DO NOT** run the script a second time if you failed to capture the output. Report the failure and stop.
 
 ## COST WARNING
 
 Every token you use costs Fernanda real money. Do NOT ramble, do NOT investigate, do NOT read source files to "understand" them. Run the one command, report the result, stop. Long exploratory sessions where you read files, analyze code, and try multiple approaches are EXTREMELY expensive and waste her money. Be brief. Be direct. Run the script. Report. Stop.
+
+## 2FA Code Handoff
+
+The script handles 2FA by writing a signal file and waiting for the code via a file — it does NOT poll Telegram itself. Here's what happens:
+
+1. The script sends a Telegram message asking Fernanda for her 2FA code
+2. The script creates `/tmp/.bcbs_waiting_for_2fa` and polls `/tmp/.bcbs_2fa_code` every 3 seconds
+
+**YOUR JOB during 2FA:**
+- When you see Fernanda reply with a **6-digit code** while the script is running, **immediately** write that code to `/tmp/.bcbs_2fa_code`:
+  ```bash
+  echo "123456" > /tmp/.bcbs_2fa_code
+  ```
+- Replace `123456` with the actual code she sent.
+- Do this as fast as possible — the script has a 5-minute timeout.
+- Do NOT ask Fernanda for the code yourself — the script already asked her via Telegram.
 
 ## If The Script Fails
 

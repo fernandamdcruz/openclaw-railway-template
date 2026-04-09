@@ -232,10 +232,11 @@ OKTA_TOKEN_ENDPOINT = "https://login.members.bcbsglobalsolutions.com/oauth2/ausd
 OKTA_CLIENT_ID = "0oaddmkwyk7EHdc9j4h7"
 
 
-def _manual_token_exchange(auth_code: str, callback_url: str) -> Optional[str]:
+def _manual_token_exchange(auth_code: str, callback_url: str, code_verifier: str = None) -> Optional[str]:
     """
     Exchange an OAuth authorization code for an access token manually.
     This bypasses the browser's client-side token exchange which Playwright may miss.
+    Includes PKCE code_verifier if available (required by modern Okta setups).
     """
     from urllib.parse import urlparse, parse_qs
 
@@ -243,29 +244,33 @@ def _manual_token_exchange(auth_code: str, callback_url: str) -> Optional[str]:
     parsed = urlparse(callback_url)
     redirect_uri = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
 
-    print(f"[AUTH] Manual token exchange: code length={len(auth_code)}, redirect_uri={redirect_uri}")
+    print(f"[AUTH] Manual token exchange: code length={len(auth_code)}, redirect_uri={redirect_uri}, pkce={'yes' if code_verifier else 'no'}")
+
+    data = {
+        "grant_type": "authorization_code",
+        "code": auth_code,
+        "client_id": OKTA_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+    }
+    if code_verifier:
+        data["code_verifier"] = code_verifier
 
     try:
         resp = requests.post(
             OKTA_TOKEN_ENDPOINT,
-            data={
-                "grant_type": "authorization_code",
-                "code": auth_code,
-                "client_id": OKTA_CLIENT_ID,
-                "redirect_uri": redirect_uri,
-            },
+            data=data,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             timeout=15,
         )
         print(f"[AUTH] Token exchange response: {resp.status_code}")
         if resp.status_code == 200:
-            data = resp.json()
-            token = data.get("access_token")
+            resp_data = resp.json()
+            token = resp_data.get("access_token")
             if token:
-                print(f"[AUTH] Token obtained via manual exchange (expires_in={data.get('expires_in')}s)")
+                print(f"[AUTH] Token obtained via manual exchange (expires_in={resp_data.get('expires_in')}s)")
                 return token
             else:
-                print(f"[AUTH] Token exchange succeeded but no access_token in response: {list(data.keys())}")
+                print(f"[AUTH] Token exchange succeeded but no access_token in response: {list(resp_data.keys())}")
         else:
             print(f"[AUTH] Token exchange failed: {resp.text[:300]}")
     except Exception as e:
@@ -305,22 +310,28 @@ async def obtain_oauth_token() -> Optional[str]:
 
     captured_token = {"value": None}
     captured_auth_code = {"value": None, "url": None}
+    captured_pkce = {"code_verifier": None}
 
     async def intercept_token(response):
-        """Capture the access_token from Okta's /v1/token response."""
-        if "/v1/token" in response.url and response.status == 200:
+        """Capture the access_token from Okta's token response."""
+        # Broader pattern: match /v1/token, /token, or any Okta token endpoint
+        if ("/token" in response.url) and response.status == 200:
             try:
+                ct = response.headers.get("content-type", "")
+                if "json" not in ct:
+                    return
                 data = await response.json()
                 token = data.get("access_token")
                 if token:
                     captured_token["value"] = token
-                    print(f"[AUTH] Captured OAuth token via response listener (expires_in={data.get('expires_in')}s)")
+                    print(f"[AUTH] Captured OAuth token via response listener (expires_in={data.get('expires_in')}s, url={response.url[:80]})")
             except Exception as e:
                 print(f"[AUTH] Failed to parse token response: {e}")
 
     async def intercept_callback(request):
-        """Capture the authorization code from the OAuth callback redirect."""
+        """Capture the authorization code and PKCE code_verifier from OAuth flow."""
         url = request.url
+        # Capture auth code from callback redirect
         if "code=" in url and ("callback" in url or "redirect" in url or "bcbsglobalsolutions" in url):
             from urllib.parse import urlparse, parse_qs
             parsed = urlparse(url)
@@ -330,6 +341,20 @@ async def obtain_oauth_token() -> Optional[str]:
                 captured_auth_code["value"] = code
                 captured_auth_code["url"] = url
                 print(f"[AUTH] Captured OAuth authorization code from callback (length: {len(code)})")
+
+        # Capture PKCE code_verifier from token exchange requests
+        if "/token" in url and request.method == "POST":
+            try:
+                post_data = request.post_data or ""
+                if "code_verifier=" in post_data:
+                    from urllib.parse import parse_qs as pqs
+                    params = pqs(post_data)
+                    cv = params.get("code_verifier", [None])[0]
+                    if cv:
+                        captured_pkce["code_verifier"] = cv
+                        print(f"[AUTH] Captured PKCE code_verifier (length: {len(cv)})")
+            except Exception:
+                pass
 
     print("[AUTH] Starting Playwright login to obtain OAuth token...")
     screenshot_dir = "/tmp/bcbs_auth_screenshots"
@@ -467,14 +492,20 @@ async def obtain_oauth_token() -> Optional[str]:
                     verify_btn = page.locator('input[type="submit"]')
                     await verify_btn.click()
                     print("[AUTH] 2FA code submitted")
-                    await asyncio.sleep(8)
+                    await asyncio.sleep(10)
+                    # Wait for the redirect chain to complete
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=15000)
+                    except Exception:
+                        pass  # networkidle may not fire if SPA keeps polling
+                    await asyncio.sleep(5)
                 else:
                     print("[AUTH] Could not get 2FA code — aborting")
                     return None
 
             # Wait for redirect and token capture
-            # Give it up to 15s total, checking every second
-            for wait_i in range(15):
+            # Give it up to 30s total, checking every second
+            for wait_i in range(30):
                 await asyncio.sleep(1)
                 if captured_token["value"]:
                     break
@@ -488,7 +519,11 @@ async def obtain_oauth_token() -> Optional[str]:
             # METHOD 2: We captured the auth code from the callback URL — do token exchange manually
             if captured_auth_code["value"]:
                 print("[AUTH] Attempting manual token exchange with captured auth code...")
-                token = _manual_token_exchange(captured_auth_code["value"], captured_auth_code["url"])
+                token = _manual_token_exchange(
+                    captured_auth_code["value"],
+                    captured_auth_code["url"],
+                    code_verifier=captured_pkce.get("code_verifier"),
+                )
                 if token:
                     return token
 
@@ -501,7 +536,11 @@ async def obtain_oauth_token() -> Optional[str]:
                 auth_code = params.get("code", [None])[0]
                 if auth_code:
                     print(f"[AUTH] Found auth code in current URL — attempting manual exchange...")
-                    token = _manual_token_exchange(auth_code, current_url)
+                    token = _manual_token_exchange(
+                        auth_code,
+                        current_url,
+                        code_verifier=captured_pkce.get("code_verifier"),
+                    )
                     if token:
                         return token
 
@@ -542,9 +581,45 @@ async def obtain_oauth_token() -> Optional[str]:
             except Exception as e:
                 print(f"[AUTH] Browser storage check failed: {e}")
 
+            # METHOD 5: Try extracting PKCE code_verifier from Okta SDK state in browser
+            if captured_auth_code["value"] and not captured_pkce.get("code_verifier"):
+                try:
+                    okta_cv = await page.evaluate("""() => {
+                        // Okta widget stores PKCE state in sessionStorage or localStorage
+                        for (const store of [sessionStorage, localStorage]) {
+                            for (let i = 0; i < store.length; i++) {
+                                const key = store.key(i);
+                                const val = store.getItem(key);
+                                if (val && (key.includes('okta') || key.includes('pkce') || key.includes('codeVerifier'))) {
+                                    try {
+                                        const parsed = JSON.parse(val);
+                                        if (parsed.codeVerifier) return parsed.codeVerifier;
+                                        if (parsed.code_verifier) return parsed.code_verifier;
+                                    } catch(e) {}
+                                }
+                            }
+                        }
+                        return null;
+                    }""")
+                    if okta_cv:
+                        print(f"[AUTH] Found PKCE code_verifier in browser storage (length: {len(okta_cv)})")
+                        token = _manual_token_exchange(
+                            captured_auth_code["value"],
+                            captured_auth_code["url"],
+                            code_verifier=okta_cv,
+                        )
+                        if token:
+                            return token
+                except Exception as e:
+                    print(f"[AUTH] PKCE extraction from browser storage failed: {e}")
+
             print("[AUTH] All token capture methods failed")
-            print(f"[AUTH] captured_token listener fired: {captured_token['value'] is not None}")
-            print(f"[AUTH] captured_auth_code: {captured_auth_code['value'] is not None}")
+            print(f"[AUTH]   Method 1 (response listener): {'fired' if captured_token['value'] else 'no token response seen'}")
+            print(f"[AUTH]   Method 2 (auth code + exchange): auth_code={'captured' if captured_auth_code['value'] else 'not captured'}, pkce={'yes' if captured_pkce.get('code_verifier') else 'no'}")
+            print(f"[AUTH]   Method 4 (browser storage): checked")
+            print(f"[AUTH]   Final URL: {page.url}")
+            await _dump_page_state(page, "all-methods-failed")
+            await _screenshot(page, "98_all_methods_failed")
             return None
 
         except Exception as e:
@@ -1242,77 +1317,76 @@ def send_telegram(message: str) -> None:
         print(f"[TG] Failed to send: {e}")
 
 
+TWO_FA_WAITING_FILE = "/tmp/.bcbs_waiting_for_2fa"
+TWO_FA_CODE_FILE = "/tmp/.bcbs_2fa_code"
+
+
 def ask_telegram_for_2fa() -> Optional[str]:
     """
-    Send a Telegram message asking the user for the 2FA code,
-    then poll for their reply. Returns the 6-digit code or None.
+    Request the 2FA code via file-based handoff with FerdyBot.
+
+    The script does NOT poll Telegram directly — that races with FerdyBot's
+    own getUpdates calls, causing one to "eat" the message before the other
+    sees it. This is why the 2FA code appeared to be ignored.
+
+    Instead:
+    1. Script writes /tmp/.bcbs_waiting_for_2fa to signal it needs a code
+    2. Script sends a Telegram message asking the user
+    3. FerdyBot sees the user's reply and writes the code to /tmp/.bcbs_2fa_code
+    4. Script reads the code from the file
     """
     import time
 
-    token, chat_id = _get_telegram_creds()
-    if not token or not chat_id:
-        print("[TG] No Telegram credentials — cannot ask for 2FA code")
-        return None
+    # Clean up stale files from previous runs
+    for f in [TWO_FA_WAITING_FILE, TWO_FA_CODE_FILE]:
+        try:
+            os.remove(f)
+        except FileNotFoundError:
+            pass
 
-    # Get the latest update_id so we only look at NEW messages
-    try:
-        resp = requests.get(
-            f"https://api.telegram.org/bot{token}/getUpdates",
-            params={"limit": 1, "offset": -1, "timeout": 0},
-            timeout=10
-        )
-        data = resp.json()
-        last_update_id = 0
-        if data.get("ok") and data.get("result"):
-            last_update_id = data["result"][-1]["update_id"]
-        print(f"[TG] Last update_id before asking: {last_update_id}")
-    except Exception as e:
-        print(f"[TG] Failed to get updates baseline: {e}")
-        last_update_id = 0
+    # Signal that we're waiting for a 2FA code
+    with open(TWO_FA_WAITING_FILE, "w") as f:
+        f.write(f"waiting_since={datetime.now().isoformat()}\n")
+    print(f"[2FA] Wrote waiting signal to {TWO_FA_WAITING_FILE}")
 
-    # Ask the user
+    # Ask the user via Telegram
     send_telegram(
         "I need your BCBS 2FA verification code. "
         "Check your email for the 6-digit code and reply here with it. "
         "I'll wait up to 5 minutes."
     )
 
-    # Poll for reply (5 minutes, checking every 5 seconds)
-    for attempt in range(60):
-        time.sleep(5)
+    # Poll for the code file (5 minutes, checking every 3 seconds)
+    for attempt in range(100):
+        time.sleep(3)
         try:
-            resp = requests.get(
-                f"https://api.telegram.org/bot{token}/getUpdates",
-                params={"offset": last_update_id + 1, "timeout": 5},
-                timeout=15
-            )
-            data = resp.json()
-            if not data.get("ok"):
-                continue
-
-            for update in data.get("result", []):
-                msg = update.get("message", {})
-                # Only accept messages from the right chat
-                if str(msg.get("chat", {}).get("id")) != str(chat_id):
-                    continue
-                text = (msg.get("text") or "").strip()
-                # Look for a 6-digit code in the reply
-                match = re.search(r'\b(\d{6})\b', text)
+            if os.path.exists(TWO_FA_CODE_FILE):
+                with open(TWO_FA_CODE_FILE, "r") as f:
+                    content = f.read().strip()
+                match = re.search(r'\b(\d{6})\b', content)
                 if match:
                     code = match.group(1)
-                    print(f"[TG] Received 2FA code from user: ****{code[-2:]}")
+                    print(f"[2FA] Received code from file: ****{code[-2:]}")
+                    # Clean up
+                    for cleanup in [TWO_FA_WAITING_FILE, TWO_FA_CODE_FILE]:
+                        try:
+                            os.remove(cleanup)
+                        except FileNotFoundError:
+                            pass
                     return code
-                # Update offset to skip processed messages
-                last_update_id = update["update_id"]
-
         except Exception as e:
-            print(f"[TG] Poll error: {e}")
+            print(f"[2FA] File poll error: {e}")
 
-        if attempt % 12 == 11:  # Every 60 seconds
-            print(f"[TG] Still waiting for 2FA code... ({(attempt+1)*5}s elapsed)")
+        if attempt % 20 == 19:  # Every 60 seconds
+            print(f"[2FA] Still waiting for code file... ({(attempt+1)*3}s elapsed)")
 
-    print("[TG] Timed out waiting for 2FA code from user")
+    print("[2FA] Timed out waiting for 2FA code")
     send_telegram("Timed out waiting for 2FA code. Please try again.")
+    # Clean up
+    try:
+        os.remove(TWO_FA_WAITING_FILE)
+    except FileNotFoundError:
+        pass
     return None
 
 
