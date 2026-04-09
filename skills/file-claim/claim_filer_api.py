@@ -374,11 +374,12 @@ async def obtain_oauth_token() -> Optional[str]:
             await _dump_page_state(page, "after-landing")
             await _screenshot(page, "01_landing")
 
-            # Click Login button (Flutter landing page)
+            # Click Login button (Flutter landing page — may match multiple)
             login_btn = page.get_by_role("button", name=re.compile("^login$", re.IGNORECASE))
             btn_count = await login_btn.count()
             if btn_count > 0:
-                await login_btn.click()
+                print(f"[AUTH] Found {btn_count} Login button(s), clicking first")
+                await login_btn.first.click()
                 await asyncio.sleep(5)
                 print(f"[AUTH] Clicked Login button, redirected to: {page.url}")
             else:
