@@ -1378,13 +1378,10 @@ def ask_telegram_for_2fa() -> Optional[str]:
     """
     Request the 2FA code from the user via Telegram.
 
-    Uses TWO parallel methods to receive the code:
-    1. File-based handoff: polls /tmp/.bcbs_2fa_code (in case FerdyBot writes it)
-    2. Direct Telegram getUpdates polling: reads messages directly from Telegram API
-
-    The direct polling is safe here because FerdyBot is BLOCKED waiting for this
-    script to finish — it can't consume messages while we're running. So there's
-    no race condition during script execution.
+    IMPORTANT: The OpenClaw gateway sets a webhook for the Telegram bot.
+    While a webhook is active, Telegram's getUpdates API returns NOTHING.
+    So we MUST temporarily remove the webhook, poll for the code, and
+    restore the webhook when done.
 
     This function uses time.sleep() and MUST be called via asyncio.to_thread()
     from async code to avoid blocking the event loop.
@@ -1398,25 +1395,54 @@ def ask_telegram_for_2fa() -> Optional[str]:
         except FileNotFoundError:
             pass
 
-    # Signal that we're waiting for a 2FA code
-    with open(TWO_FA_WAITING_FILE, "w") as f:
-        f.write(f"waiting_since={datetime.now().isoformat()}\n")
-    print(f"[2FA] Wrote waiting signal to {TWO_FA_WAITING_FILE}")
-
-    # Ask the user via Telegram
-    send_telegram(
-        "🔐 I need your BCBS 2FA verification code. "
-        "Check your email for the 6-digit code and reply here with it. "
-        "I'll wait up to 5 minutes."
-    )
-    print("[2FA] Sent 2FA request via Telegram, polling for reply...")
-
-    # Get Telegram credentials for direct polling
+    # Get Telegram credentials
     tg_token, tg_chat_id = _get_telegram_creds()
+    if not tg_token:
+        print("[2FA] ERROR: No Telegram bot token — cannot ask for 2FA code")
+        return None
 
-    # Get current update offset so we only see NEW messages
-    last_update_id = 0
-    if tg_token:
+    print(f"[2FA] Telegram creds: token=****{tg_token[-4:]}, chat_id={tg_chat_id}")
+
+    # ── Step 1: Check for webhook and temporarily remove it ──
+    # If the gateway set a webhook, getUpdates is completely disabled.
+    saved_webhook_url = ""
+    try:
+        info_resp = requests.get(
+            f"https://api.telegram.org/bot{tg_token}/getWebhookInfo",
+            timeout=5
+        )
+        if info_resp.ok:
+            webhook_info = info_resp.json().get("result", {})
+            saved_webhook_url = webhook_info.get("url", "")
+            pending = webhook_info.get("pending_update_count", 0)
+            print(f"[2FA] Webhook status: url={'SET (' + saved_webhook_url[:60] + '...)' if saved_webhook_url else 'NONE'}, pending={pending}")
+
+            if saved_webhook_url:
+                del_resp = requests.get(
+                    f"https://api.telegram.org/bot{tg_token}/deleteWebhook",
+                    timeout=5
+                )
+                del_ok = del_resp.json().get("ok", False)
+                print(f"[2FA] Deleted webhook: ok={del_ok}")
+                if not del_ok:
+                    print(f"[2FA] WARNING: Failed to delete webhook — getUpdates may not work")
+                # Brief pause to let Telegram process the webhook removal
+                time.sleep(1)
+    except Exception as e:
+        print(f"[2FA] Webhook check error: {e}")
+
+    code = None
+    try:
+        # ── Step 2: Send the request to the user ──
+        send_telegram(
+            "I need your BCBS 2FA verification code. "
+            "Check your email for the 6-digit code and reply here with it. "
+            "I'll wait up to 5 minutes."
+        )
+        print("[2FA] Sent 2FA request via Telegram")
+
+        # ── Step 3: Get baseline update offset ──
+        last_update_id = 0
         try:
             resp = requests.get(
                 f"https://api.telegram.org/bot{tg_token}/getUpdates",
@@ -1424,77 +1450,110 @@ def ask_telegram_for_2fa() -> Optional[str]:
                 timeout=5
             )
             if resp.ok:
-                updates = resp.json().get("result", [])
+                result = resp.json()
+                updates = result.get("result", [])
                 if updates:
                     last_update_id = updates[-1]["update_id"]
-                    print(f"[2FA] Telegram baseline update_id: {last_update_id}")
+                print(f"[2FA] Baseline: update_id={last_update_id}, ok={result.get('ok')}, count={len(updates)}")
+            else:
+                print(f"[2FA] Baseline call failed: HTTP {resp.status_code} — {resp.text[:200]}")
         except Exception as e:
-            print(f"[2FA] Could not get Telegram baseline: {e}")
+            print(f"[2FA] Baseline error: {e}")
 
-    # Poll for the code (5 minutes, checking every 3 seconds)
-    for attempt in range(100):
-        time.sleep(3)
-
-        # Method 1: Check the file (in case FerdyBot or another process wrote it)
-        try:
-            if os.path.exists(TWO_FA_CODE_FILE):
-                with open(TWO_FA_CODE_FILE, "r") as f:
-                    content = f.read().strip()
-                match = re.search(r'\b(\d{6})\b', content)
-                if match:
-                    code = match.group(1)
-                    print(f"[2FA] Got code from FILE: ****{code[-2:]}")
-                    for cleanup in [TWO_FA_WAITING_FILE, TWO_FA_CODE_FILE]:
-                        try:
-                            os.remove(cleanup)
-                        except FileNotFoundError:
-                            pass
-                    return code
-        except Exception as e:
-            print(f"[2FA] File poll error: {e}")
-
-        # Method 2: Poll Telegram getUpdates directly
-        if tg_token and tg_chat_id:
+        # ── Step 4: Poll for the code using long polling ──
+        # Long polling (timeout=10) holds the connection open so we catch
+        # messages immediately when they arrive, instead of sleeping and hoping.
+        for attempt in range(30):  # 30 × ~10s = ~5 minutes
             try:
                 resp = requests.get(
                     f"https://api.telegram.org/bot{tg_token}/getUpdates",
-                    params={"offset": last_update_id + 1, "limit": 10, "timeout": 0},
-                    timeout=5
+                    params={
+                        "offset": last_update_id + 1,
+                        "limit": 10,
+                        "timeout": 10,  # 10-second long poll
+                        "allowed_updates": '["message"]'
+                    },
+                    timeout=15  # HTTP timeout > Telegram timeout
                 )
                 if resp.ok:
                     updates = resp.json().get("result", [])
+                    if attempt == 0 or (attempt < 3 and updates):
+                        print(f"[2FA] Poll attempt {attempt+1}: {len(updates)} update(s)")
+
                     for update in updates:
                         last_update_id = update["update_id"]
                         msg = update.get("message", {})
                         text = msg.get("text", "")
                         chat = msg.get("chat", {})
-                        # Only accept messages from the correct chat
-                        if str(chat.get("id")) == str(tg_chat_id):
+                        sender = msg.get("from", {})
+                        msg_chat_id = str(chat.get("id", ""))
+
+                        # Log every message we see (helps debug chat_id mismatches)
+                        if text:
+                            print(f"[2FA] Got message: chat_id={msg_chat_id}, "
+                                  f"from={sender.get('first_name', '?')}, "
+                                  f"text='{text[:30]}', is_bot={sender.get('is_bot', '?')}")
+
+                        # Accept messages from the target chat that contain 6 digits
+                        if msg_chat_id == str(tg_chat_id) and not sender.get("is_bot", False):
                             code_match = re.search(r'\b(\d{6})\b', text)
                             if code_match:
                                 code = code_match.group(1)
-                                print(f"[2FA] Got code from TELEGRAM: ****{code[-2:]}")
-                                for cleanup in [TWO_FA_WAITING_FILE, TWO_FA_CODE_FILE]:
-                                    try:
-                                        os.remove(cleanup)
-                                    except FileNotFoundError:
-                                        pass
+                                print(f"[2FA] SUCCESS: Got code ****{code[-2:]} from Telegram")
                                 return code
+                else:
+                    if attempt == 0:
+                        print(f"[2FA] Poll failed: HTTP {resp.status_code} — {resp.text[:200]}")
+            except requests.exceptions.Timeout:
+                pass  # Normal for long polling
             except Exception as e:
-                if attempt == 0:
-                    print(f"[2FA] Telegram poll error: {e}")
+                print(f"[2FA] Poll error (attempt {attempt+1}): {e}")
+                time.sleep(3)
 
-        if attempt % 20 == 19:  # Every 60 seconds
-            print(f"[2FA] Still waiting for code... ({(attempt+1)*3}s elapsed)")
+            # Also check the file on each iteration (belt + suspenders)
+            try:
+                if os.path.exists(TWO_FA_CODE_FILE):
+                    with open(TWO_FA_CODE_FILE, "r") as f:
+                        content = f.read().strip()
+                    match = re.search(r'\b(\d{6})\b', content)
+                    if match:
+                        code = match.group(1)
+                        print(f"[2FA] Got code from FILE: ****{code[-2:]}")
+                        return code
+            except Exception:
+                pass
 
-    print("[2FA] Timed out waiting for 2FA code (5 minutes)")
-    send_telegram("⏰ Timed out waiting for 2FA code. Please try again.")
-    for cleanup in [TWO_FA_WAITING_FILE, TWO_FA_CODE_FILE]:
-        try:
-            os.remove(cleanup)
-        except FileNotFoundError:
-            pass
-    return None
+            if attempt % 6 == 5:  # Every ~60 seconds
+                print(f"[2FA] Still waiting for code... (~{(attempt+1)*10}s elapsed)")
+
+        print("[2FA] Timed out waiting for 2FA code (5 minutes)")
+        send_telegram("Timed out waiting for 2FA code. Please try again.")
+        return None
+
+    finally:
+        # ── Step 5: ALWAYS restore the webhook ──
+        if saved_webhook_url:
+            try:
+                restore_resp = requests.get(
+                    f"https://api.telegram.org/bot{tg_token}/setWebhook",
+                    params={"url": saved_webhook_url},
+                    timeout=10
+                )
+                restore_ok = restore_resp.json().get("ok", False)
+                print(f"[2FA] Restored webhook: ok={restore_ok}")
+                if not restore_ok:
+                    print(f"[2FA] CRITICAL: Failed to restore webhook! FerdyBot may stop receiving messages.")
+                    print(f"[2FA] Webhook URL was: {saved_webhook_url[:80]}")
+            except Exception as e:
+                print(f"[2FA] CRITICAL: Exception restoring webhook: {e}")
+                print(f"[2FA] Webhook URL was: {saved_webhook_url[:80]}")
+
+        # Clean up signal files
+        for cleanup in [TWO_FA_WAITING_FILE, TWO_FA_CODE_FILE]:
+            try:
+                os.remove(cleanup)
+            except FileNotFoundError:
+                pass
 
 
 # ============================================================================
