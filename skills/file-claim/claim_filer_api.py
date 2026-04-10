@@ -1406,17 +1406,15 @@ TWO_FA_CODE_FILE = "/tmp/.bcbs_2fa_code"
 
 def ask_telegram_for_2fa() -> Optional[str]:
     """
-    Request the 2FA code via file-based handoff with FerdyBot.
+    Request the 2FA code from the user via Telegram.
 
-    Flow:
-    1. Script creates /tmp/.bcbs_waiting_for_2fa to signal it needs a code
-    2. Script sends a Telegram message asking the user
-    3. FerdyBot sees the user's reply and writes the code to /tmp/.bcbs_2fa_code
-    4. Script reads the code from the file
+    Uses TWO parallel methods to receive the code:
+    1. File-based handoff: polls /tmp/.bcbs_2fa_code (in case FerdyBot writes it)
+    2. Direct Telegram getUpdates polling: reads messages directly from Telegram API
 
-    NOTE: We do NOT poll Telegram's getUpdates API directly — that races with
-    FerdyBot's own getUpdates polling and whichever calls first consumes the
-    message. File-based handoff avoids this race entirely.
+    The direct polling is safe here because FerdyBot is BLOCKED waiting for this
+    script to finish — it can't consume messages while we're running. So there's
+    no race condition during script execution.
 
     This function uses time.sleep() and MUST be called via asyncio.to_thread()
     from async code to avoid blocking the event loop.
@@ -1437,15 +1435,37 @@ def ask_telegram_for_2fa() -> Optional[str]:
 
     # Ask the user via Telegram
     send_telegram(
-        "I need your BCBS 2FA verification code. "
+        "🔐 I need your BCBS 2FA verification code. "
         "Check your email for the 6-digit code and reply here with it. "
         "I'll wait up to 5 minutes."
     )
-    print("[2FA] Sent 2FA request via Telegram, polling file for reply...")
+    print("[2FA] Sent 2FA request via Telegram, polling for reply...")
 
-    # Poll for the code file (5 minutes, checking every 3 seconds)
+    # Get Telegram credentials for direct polling
+    tg_token, tg_chat_id = _get_telegram_creds()
+
+    # Get current update offset so we only see NEW messages
+    last_update_id = 0
+    if tg_token:
+        try:
+            resp = requests.get(
+                f"https://api.telegram.org/bot{tg_token}/getUpdates",
+                params={"offset": -1, "limit": 1, "timeout": 0},
+                timeout=5
+            )
+            if resp.ok:
+                updates = resp.json().get("result", [])
+                if updates:
+                    last_update_id = updates[-1]["update_id"]
+                    print(f"[2FA] Telegram baseline update_id: {last_update_id}")
+        except Exception as e:
+            print(f"[2FA] Could not get Telegram baseline: {e}")
+
+    # Poll for the code (5 minutes, checking every 3 seconds)
     for attempt in range(100):
         time.sleep(3)
+
+        # Method 1: Check the file (in case FerdyBot or another process wrote it)
         try:
             if os.path.exists(TWO_FA_CODE_FILE):
                 with open(TWO_FA_CODE_FILE, "r") as f:
@@ -1453,7 +1473,7 @@ def ask_telegram_for_2fa() -> Optional[str]:
                 match = re.search(r'\b(\d{6})\b', content)
                 if match:
                     code = match.group(1)
-                    print(f"[2FA] Got code from file: ****{code[-2:]}")
+                    print(f"[2FA] Got code from FILE: ****{code[-2:]}")
                     for cleanup in [TWO_FA_WAITING_FILE, TWO_FA_CODE_FILE]:
                         try:
                             os.remove(cleanup)
@@ -1463,11 +1483,42 @@ def ask_telegram_for_2fa() -> Optional[str]:
         except Exception as e:
             print(f"[2FA] File poll error: {e}")
 
+        # Method 2: Poll Telegram getUpdates directly
+        if tg_token and tg_chat_id:
+            try:
+                resp = requests.get(
+                    f"https://api.telegram.org/bot{tg_token}/getUpdates",
+                    params={"offset": last_update_id + 1, "limit": 10, "timeout": 0},
+                    timeout=5
+                )
+                if resp.ok:
+                    updates = resp.json().get("result", [])
+                    for update in updates:
+                        last_update_id = update["update_id"]
+                        msg = update.get("message", {})
+                        text = msg.get("text", "")
+                        chat = msg.get("chat", {})
+                        # Only accept messages from the correct chat
+                        if str(chat.get("id")) == str(tg_chat_id):
+                            code_match = re.search(r'\b(\d{6})\b', text)
+                            if code_match:
+                                code = code_match.group(1)
+                                print(f"[2FA] Got code from TELEGRAM: ****{code[-2:]}")
+                                for cleanup in [TWO_FA_WAITING_FILE, TWO_FA_CODE_FILE]:
+                                    try:
+                                        os.remove(cleanup)
+                                    except FileNotFoundError:
+                                        pass
+                                return code
+            except Exception as e:
+                if attempt == 0:
+                    print(f"[2FA] Telegram poll error: {e}")
+
         if attempt % 20 == 19:  # Every 60 seconds
-            print(f"[2FA] Still waiting for code file... ({(attempt+1)*3}s elapsed)")
+            print(f"[2FA] Still waiting for code... ({(attempt+1)*3}s elapsed)")
 
     print("[2FA] Timed out waiting for 2FA code (5 minutes)")
-    send_telegram("Timed out waiting for 2FA code. Please try again.")
+    send_telegram("⏰ Timed out waiting for 2FA code. Please try again.")
     for cleanup in [TWO_FA_WAITING_FILE, TWO_FA_CODE_FILE]:
         try:
             os.remove(cleanup)
@@ -1627,6 +1678,35 @@ def file_single_claim(claim_data: dict) -> Tuple[bool, str]:
         else:
             # No drive link = no receipt = cannot submit
             return (False, f"No supporting document link in sheet for claim {claim_id} — claim NOT submitted (receipt is required)")
+
+        # ── Step 4b: Upload secondary document (if present) ──
+        secondary_link = claim_data.get("secondary_doc", "").strip()
+        if secondary_link:
+            print("\n[STEP 4b] Uploading secondary supporting document...")
+
+            sec_ext = "pdf"
+            for e in ["jpg", "jpeg", "png", "pdf"]:
+                if e in secondary_link.lower():
+                    sec_ext = e
+                    break
+
+            with tempfile.NamedTemporaryFile(suffix=f".{sec_ext}", delete=False) as tmp:
+                sec_tmp_path = tmp.name
+
+            try:
+                if download_from_drive(secondary_link, sec_tmp_path):
+                    sec_doc_info = upload_document(claim_id, charge_id, sec_tmp_path)
+                    if sec_doc_info and sec_doc_info.get("ChargeDocumentID"):
+                        print(f"[STEP 4b] Secondary document uploaded: {sec_doc_info.get('ChargeDocumentID')}")
+                    else:
+                        print("[STEP 4b] WARNING: Secondary document upload to BCBS failed — continuing with primary doc only")
+                else:
+                    print(f"[STEP 4b] WARNING: Could not download secondary doc from Drive — continuing with primary doc only. Link: {secondary_link}")
+            except Exception as e:
+                print(f"[STEP 4b] WARNING: Secondary document upload error: {e} — continuing with primary doc only")
+            finally:
+                if os.path.exists(sec_tmp_path):
+                    os.unlink(sec_tmp_path)
 
         # ── Step 5: Set payment account ──
         print("\n[STEP 5] Setting payment account...")

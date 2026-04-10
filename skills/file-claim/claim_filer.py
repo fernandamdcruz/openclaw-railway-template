@@ -751,9 +751,9 @@ def get_2fa_code_from_gmail(login_epoch: int = 0) -> Optional[str]:
                     return code
                 else:
                     stale_only_count += 1
-                    print(f"[2FA] Found {len(all_snippet_codes)} code(s) but ALL previously used (stale attempt {stale_only_count}/3)")
-                    if stale_only_count >= 3:
-                        print("[2FA] Giving up on Gmail — only stale codes after 3 attempts, falling back to Telegram")
+                    print(f"[2FA] Found {len(all_snippet_codes)} code(s) but ALL previously used (stale attempt {stale_only_count}/8)")
+                    if stale_only_count >= 8:
+                        print("[2FA] Giving up on Gmail — only stale codes after 8 attempts (~55s), falling back to Telegram")
                         return None
                     if attempt < 17:
                         time.sleep(5)
@@ -789,9 +789,9 @@ def get_2fa_code_from_gmail(login_epoch: int = 0) -> Optional[str]:
                     return code
                 else:
                     stale_only_count += 1
-                    print(f"[2FA] {len(all_codes)} code(s) but ALL previously used (stale attempt {stale_only_count}/3)")
-                    if stale_only_count >= 3:
-                        print("[2FA] Giving up on Gmail — only stale codes after 3 attempts, falling back to Telegram")
+                    print(f"[2FA] {len(all_codes)} code(s) but ALL previously used (stale attempt {stale_only_count}/8)")
+                    if stale_only_count >= 8:
+                        print("[2FA] Giving up on Gmail — only stale codes after 8 attempts (~55s), falling back to Telegram")
                         return None
                     if attempt < 17:
                         time.sleep(5)
