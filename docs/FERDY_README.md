@@ -739,6 +739,12 @@ The Gmail extraction code still exists in `claim_filer.py` but is no longer impo
 - **Runtime pip install anti-pattern**: Scripts were running `pip install` at startup. Fixed by adding `requests PyMuPDF` to the Dockerfile and replacing auto-install with clean error + exit.
 - **Used codes file in /tmp**: Was wiped on every Railway redeploy. Moved to persistent `/data/.openclaw/` volume.
 
+#### Root Cause Found (2026-04-10 evening): getUpdates Race with OpenClaw
+
+OpenClaw's gateway uses **grammY long polling** (`getUpdates`) for Telegram — NOT webhooks. When our script also calls `getUpdates`, there's a race condition: OpenClaw's polling loop consumes the user's 2FA code message before our script sees it. The April 7 success was lucky timing — the script happened to win the race.
+
+**Fix**: Before polling for the 2FA code, SIGSTOP the OpenClaw gateway process (freezes it without killing). After getting the code (or timeout), SIGCONT to resume. This makes our script the sole `getUpdates` consumer. The gateway resumes seamlessly — grammY handles reconnection automatically.
+
 ### Future: If Revisiting Gmail Auto-Extraction
 
 If you want to try auto-extraction again, the key problems to solve are:
