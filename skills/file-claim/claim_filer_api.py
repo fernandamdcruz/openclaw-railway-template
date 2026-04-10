@@ -232,11 +232,10 @@ OKTA_TOKEN_ENDPOINT = "https://login.members.bcbsglobalsolutions.com/oauth2/ausd
 OKTA_CLIENT_ID = "0oaddmkwyk7EHdc9j4h7"
 
 
-def _manual_token_exchange(auth_code: str, callback_url: str, code_verifier: str = None) -> Optional[str]:
+def _manual_token_exchange(auth_code: str, callback_url: str) -> Optional[str]:
     """
     Exchange an OAuth authorization code for an access token manually.
     This bypasses the browser's client-side token exchange which Playwright may miss.
-    Includes PKCE code_verifier if available (required by modern Okta setups).
     """
     from urllib.parse import urlparse, parse_qs
 
@@ -244,33 +243,29 @@ def _manual_token_exchange(auth_code: str, callback_url: str, code_verifier: str
     parsed = urlparse(callback_url)
     redirect_uri = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
 
-    print(f"[AUTH] Manual token exchange: code length={len(auth_code)}, redirect_uri={redirect_uri}, pkce={'yes' if code_verifier else 'no'}")
-
-    data = {
-        "grant_type": "authorization_code",
-        "code": auth_code,
-        "client_id": OKTA_CLIENT_ID,
-        "redirect_uri": redirect_uri,
-    }
-    if code_verifier:
-        data["code_verifier"] = code_verifier
+    print(f"[AUTH] Manual token exchange: code length={len(auth_code)}, redirect_uri={redirect_uri}")
 
     try:
         resp = requests.post(
             OKTA_TOKEN_ENDPOINT,
-            data=data,
+            data={
+                "grant_type": "authorization_code",
+                "code": auth_code,
+                "client_id": OKTA_CLIENT_ID,
+                "redirect_uri": redirect_uri,
+            },
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             timeout=15,
         )
         print(f"[AUTH] Token exchange response: {resp.status_code}")
         if resp.status_code == 200:
-            resp_data = resp.json()
-            token = resp_data.get("access_token")
+            data = resp.json()
+            token = data.get("access_token")
             if token:
-                print(f"[AUTH] Token obtained via manual exchange (expires_in={resp_data.get('expires_in')}s)")
+                print(f"[AUTH] Token obtained via manual exchange (expires_in={data.get('expires_in')}s)")
                 return token
             else:
-                print(f"[AUTH] Token exchange succeeded but no access_token in response: {list(resp_data.keys())}")
+                print(f"[AUTH] Token exchange succeeded but no access_token in response: {list(data.keys())}")
         else:
             print(f"[AUTH] Token exchange failed: {resp.text[:300]}")
     except Exception as e:
@@ -301,28 +296,22 @@ async def obtain_oauth_token() -> Optional[str]:
 
     captured_token = {"value": None}
     captured_auth_code = {"value": None, "url": None}
-    captured_pkce = {"code_verifier": None}
 
     async def intercept_token(response):
-        """Capture the access_token from Okta's token response."""
-        # Broader pattern: match /v1/token, /token, or any Okta token endpoint
-        if ("/token" in response.url) and response.status == 200:
+        """Capture the access_token from Okta's /v1/token response."""
+        if "/v1/token" in response.url and response.status == 200:
             try:
-                ct = response.headers.get("content-type", "")
-                if "json" not in ct:
-                    return
                 data = await response.json()
                 token = data.get("access_token")
                 if token:
                     captured_token["value"] = token
-                    print(f"[AUTH] Captured OAuth token via response listener (expires_in={data.get('expires_in')}s, url={response.url[:80]})")
+                    print(f"[AUTH] Captured OAuth token via response listener (expires_in={data.get('expires_in')}s)")
             except Exception as e:
                 print(f"[AUTH] Failed to parse token response: {e}")
 
     async def intercept_callback(request):
-        """Capture the authorization code and PKCE code_verifier from OAuth flow."""
+        """Capture the authorization code from the OAuth callback redirect."""
         url = request.url
-        # Capture auth code from callback redirect
         if "code=" in url and ("callback" in url or "redirect" in url or "bcbsglobalsolutions" in url):
             from urllib.parse import urlparse, parse_qs
             parsed = urlparse(url)
@@ -332,20 +321,6 @@ async def obtain_oauth_token() -> Optional[str]:
                 captured_auth_code["value"] = code
                 captured_auth_code["url"] = url
                 print(f"[AUTH] Captured OAuth authorization code from callback (length: {len(code)})")
-
-        # Capture PKCE code_verifier from token exchange requests
-        if "/token" in url and request.method == "POST":
-            try:
-                post_data = request.post_data or ""
-                if "code_verifier=" in post_data:
-                    from urllib.parse import parse_qs as pqs
-                    params = pqs(post_data)
-                    cv = params.get("code_verifier", [None])[0]
-                    if cv:
-                        captured_pkce["code_verifier"] = cv
-                        print(f"[AUTH] Captured PKCE code_verifier (length: {len(cv)})")
-            except Exception:
-                pass
 
     print("[AUTH] Starting Playwright login to obtain OAuth token...")
     screenshot_dir = "/tmp/bcbs_auth_screenshots"
@@ -458,22 +433,12 @@ async def obtain_oauth_token() -> Optional[str]:
                 print("[AUTH] 2FA detected — asking user for code via Telegram")
                 await _screenshot(page, "06_2fa_prompt")
 
-                # Ask user for the 2FA code via Telegram (direct getUpdates polling).
-                # We tried auto-extracting from Gmail but it was unreliable (stale codes,
-                # gog CLI ignoring time filters, thread grouping). See FERDY_README.md
-                # "2FA Debugging History" section for details.
-                # CRITICAL: must use asyncio.to_thread() because ask_telegram_for_2fa()
-                # calls time.sleep() which would block the event loop and prevent
-                # Playwright's response/request listeners from capturing the OAuth token.
-                code = await asyncio.to_thread(ask_telegram_for_2fa)
+                # Ask the user directly via Telegram
+                code = ask_telegram_for_2fa()
 
-                if not code:
-                    print("[AUTH] No 2FA code received — aborting")
-                    return None
-
-                # Enter and submit the code (up to 2 attempts)
-                for attempt_num in range(2):
-                    print(f"[AUTH] Entering 2FA code: ****{code[-2:]} (attempt {attempt_num + 1})")
+                if code:
+                    print(f"[AUTH] Got 2FA code: ****{code[-2:]}")
+                    # Find the verification code input
                     code_input = page.locator('input[name="credentials.passcode"]')
                     if await code_input.count() == 0:
                         code_input = page.locator('input[type="tel"]')
@@ -484,81 +449,34 @@ async def obtain_oauth_token() -> Optional[str]:
                     verify_btn = page.locator('input[type="submit"]')
                     await verify_btn.click()
                     print("[AUTH] 2FA code submitted")
-                    await asyncio.sleep(10)
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=15000)
-                    except Exception:
-                        pass
-                    await asyncio.sleep(5)
-
-                    # Check if the code was rejected
-                    page_text_after_code = await page.text_content("body") or ""
-                    if "invalid code" in page_text_after_code.lower() or "try again" in page_text_after_code.lower():
-                        print(f"[AUTH] 2FA code ****{code[-2:]} was REJECTED")
-                        await _screenshot(page, "07_invalid_code")
-                        if attempt_num == 0:
-                            # Ask for a new code
-                            send_telegram("That code was rejected. Please send a new 6-digit code.")
-                            code = await asyncio.to_thread(ask_telegram_for_2fa)
-                            if not code:
-                                print("[AUTH] No retry code received — aborting")
-                                return None
-                            continue
-                        else:
-                            print("[AUTH] 2FA failed twice — aborting")
-                            return None
-                    else:
-                        # Code accepted, break out of retry loop
-                        break
+                    await asyncio.sleep(8)
 
                     # Handle "Keep me signed in" interstitial (Okta post-2FA)
                     page_text_post_2fa = await page.text_content("body") or ""
                     if "keep me signed in" in page_text_post_2fa.lower() or "stay signed in" in page_text_post_2fa.lower():
                         print("[AUTH] 'Keep me signed in' interstitial detected — clicking through")
                         await _screenshot(page, "07_keep_signed_in")
-                        dont_stay = page.get_by_role("link", name=re.compile("don.*stay signed in", re.IGNORECASE))
-                        stay = page.get_by_role("link", name=re.compile("^stay signed in$", re.IGNORECASE))
-                        dont_stay_btn = page.get_by_role("button", name=re.compile("don.*stay signed in", re.IGNORECASE))
-                        stay_btn = page.get_by_role("button", name=re.compile("^stay signed in$", re.IGNORECASE))
-
-                        clicked = False
-                        for label, el in [("Don't stay (link)", dont_stay), ("Don't stay (button)", dont_stay_btn),
-                                          ("Stay (link)", stay), ("Stay (button)", stay_btn)]:
+                        # Try various button/link selectors for the interstitial
+                        for label, el in [
+                            ("Don't stay (link)", page.get_by_role("link", name=re.compile("don.*stay signed in", re.IGNORECASE))),
+                            ("Don't stay (button)", page.get_by_role("button", name=re.compile("don.*stay signed in", re.IGNORECASE))),
+                            ("Stay (link)", page.get_by_role("link", name=re.compile("^stay signed in$", re.IGNORECASE))),
+                            ("Stay (button)", page.get_by_role("button", name=re.compile("^stay signed in$", re.IGNORECASE))),
+                            ("No (button)", page.get_by_role("button", name=re.compile("^no$", re.IGNORECASE))),
+                            ("Submit", page.locator('input[type="submit"]')),
+                        ]:
                             if await el.count() > 0:
                                 await el.first.click()
-                                print(f"[AUTH] Clicked '{label}'")
-                                clicked = True
+                                print(f"[AUTH] Clicked '{label}' on interstitial")
+                                await asyncio.sleep(3)
                                 break
-
-                        if not clicked:
-                            print("[AUTH] No matching role element, trying text selector")
-                            for text_sel in ["text=/Don.t stay signed in/i", "text=/Stay signed in/i"]:
-                                el = page.locator(text_sel)
-                                if await el.count() > 0:
-                                    await el.first.click()
-                                    print(f"[AUTH] Clicked via text selector: {text_sel}")
-                                    clicked = True
-                                    break
-
-                        if not clicked:
-                            print("[AUTH] WARNING: Could not click through 'Keep me signed in' interstitial")
-                            await _dump_page_state(page, "keep-signed-in-stuck")
-
-                        await asyncio.sleep(5)
-                        try:
-                            await page.wait_for_load_state("networkidle", timeout=15000)
-                        except Exception:
-                            pass
-                        await _screenshot(page, "08_after_keep_signed_in")
-                        print(f"[AUTH] After interstitial, URL: {page.url}")
-
                 else:
                     print("[AUTH] Could not get 2FA code — aborting")
                     return None
 
             # Wait for redirect and token capture
-            # Give it up to 30s total, checking every second
-            for wait_i in range(30):
+            # Give it up to 15s total, checking every second
+            for wait_i in range(15):
                 await asyncio.sleep(1)
                 if captured_token["value"]:
                     break
@@ -572,11 +490,7 @@ async def obtain_oauth_token() -> Optional[str]:
             # METHOD 2: We captured the auth code from the callback URL — do token exchange manually
             if captured_auth_code["value"]:
                 print("[AUTH] Attempting manual token exchange with captured auth code...")
-                token = _manual_token_exchange(
-                    captured_auth_code["value"],
-                    captured_auth_code["url"],
-                    code_verifier=captured_pkce.get("code_verifier"),
-                )
+                token = _manual_token_exchange(captured_auth_code["value"], captured_auth_code["url"])
                 if token:
                     return token
 
@@ -589,11 +503,7 @@ async def obtain_oauth_token() -> Optional[str]:
                 auth_code = params.get("code", [None])[0]
                 if auth_code:
                     print(f"[AUTH] Found auth code in current URL — attempting manual exchange...")
-                    token = _manual_token_exchange(
-                        auth_code,
-                        current_url,
-                        code_verifier=captured_pkce.get("code_verifier"),
-                    )
+                    token = _manual_token_exchange(auth_code, current_url)
                     if token:
                         return token
 
@@ -634,45 +544,9 @@ async def obtain_oauth_token() -> Optional[str]:
             except Exception as e:
                 print(f"[AUTH] Browser storage check failed: {e}")
 
-            # METHOD 5: Try extracting PKCE code_verifier from Okta SDK state in browser
-            if captured_auth_code["value"] and not captured_pkce.get("code_verifier"):
-                try:
-                    okta_cv = await page.evaluate("""() => {
-                        // Okta widget stores PKCE state in sessionStorage or localStorage
-                        for (const store of [sessionStorage, localStorage]) {
-                            for (let i = 0; i < store.length; i++) {
-                                const key = store.key(i);
-                                const val = store.getItem(key);
-                                if (val && (key.includes('okta') || key.includes('pkce') || key.includes('codeVerifier'))) {
-                                    try {
-                                        const parsed = JSON.parse(val);
-                                        if (parsed.codeVerifier) return parsed.codeVerifier;
-                                        if (parsed.code_verifier) return parsed.code_verifier;
-                                    } catch(e) {}
-                                }
-                            }
-                        }
-                        return null;
-                    }""")
-                    if okta_cv:
-                        print(f"[AUTH] Found PKCE code_verifier in browser storage (length: {len(okta_cv)})")
-                        token = _manual_token_exchange(
-                            captured_auth_code["value"],
-                            captured_auth_code["url"],
-                            code_verifier=okta_cv,
-                        )
-                        if token:
-                            return token
-                except Exception as e:
-                    print(f"[AUTH] PKCE extraction from browser storage failed: {e}")
-
             print("[AUTH] All token capture methods failed")
-            print(f"[AUTH]   Method 1 (response listener): {'fired' if captured_token['value'] else 'no token response seen'}")
-            print(f"[AUTH]   Method 2 (auth code + exchange): auth_code={'captured' if captured_auth_code['value'] else 'not captured'}, pkce={'yes' if captured_pkce.get('code_verifier') else 'no'}")
-            print(f"[AUTH]   Method 4 (browser storage): checked")
-            print(f"[AUTH]   Final URL: {page.url}")
-            await _dump_page_state(page, "all-methods-failed")
-            await _screenshot(page, "98_all_methods_failed")
+            print(f"[AUTH] captured_token listener fired: {captured_token['value'] is not None}")
+            print(f"[AUTH] captured_auth_code: {captured_auth_code['value'] is not None}")
             return None
 
         except Exception as e:
@@ -1370,14 +1244,10 @@ def send_telegram(message: str) -> None:
         print(f"[TG] Failed to send: {e}")
 
 
-TWO_FA_WAITING_FILE = "/tmp/.bcbs_waiting_for_2fa"
-TWO_FA_CODE_FILE = "/tmp/.bcbs_2fa_code"
-
-
-def _stop_openclaw_telegram_polling() -> Optional[int]:
+def _stop_openclaw_telegram_polling() -> Optional[list]:
     """
     Temporarily pause OpenClaw's Telegram polling by sending SIGSTOP to the
-    gateway process. Returns the PID if stopped, or None.
+    gateway process. Returns the list of PIDs if stopped, or None.
 
     OpenClaw uses grammY's long polling (getUpdates) for Telegram. While it's
     running, it races with our own getUpdates calls and consumes messages before
@@ -1387,19 +1257,16 @@ def _stop_openclaw_telegram_polling() -> Optional[int]:
     import signal
 
     try:
-        # Find the openclaw gateway process
         result = subprocess.run(
             ["pgrep", "-f", "openclaw.*gateway"],
             capture_output=True, text=True, timeout=5
         )
         if result.returncode == 0 and result.stdout.strip():
-            pids = result.stdout.strip().split("\n")
-            # Stop all matching processes
-            for pid_str in pids:
-                pid = int(pid_str.strip())
+            pids = [int(p.strip()) for p in result.stdout.strip().split("\n")]
+            for pid in pids:
                 os.kill(pid, signal.SIGSTOP)
                 print(f"[2FA] Paused OpenClaw gateway process (PID {pid})")
-            return [int(p.strip()) for p in pids]
+            return pids
     except Exception as e:
         print(f"[2FA] Could not pause gateway: {e}")
     return None
@@ -1419,178 +1286,103 @@ def _resume_openclaw_telegram_polling(pids: list) -> None:
 
 def ask_telegram_for_2fa() -> Optional[str]:
     """
-    Request the 2FA code from the user via Telegram.
+    Send a Telegram message asking the user for the 2FA code,
+    then poll for their reply. Returns the 6-digit code or None.
 
-    CRITICAL ARCHITECTURE NOTE:
-    OpenClaw's gateway uses grammY long polling (getUpdates) for Telegram.
-    If we also call getUpdates, there's a race — OpenClaw consumes the user's
-    message before we see it. To fix this, we SIGSTOP the gateway process
-    during polling so we're the sole getUpdates consumer, then SIGCONT it
-    when done.
-
-    This function uses time.sleep() and MUST be called via asyncio.to_thread()
-    from async code to avoid blocking the event loop.
+    IMPORTANT: Pauses OpenClaw's gateway (SIGSTOP) during polling to prevent
+    it from racing us for getUpdates messages. Resumes (SIGCONT) in finally.
     """
     import time
 
-    # Clean up stale files from previous runs
-    for f in [TWO_FA_WAITING_FILE, TWO_FA_CODE_FILE]:
-        try:
-            os.remove(f)
-        except FileNotFoundError:
-            pass
-
-    # Get Telegram credentials
-    tg_token, tg_chat_id = _get_telegram_creds()
-    if not tg_token:
-        print("[2FA] ERROR: No Telegram bot token — cannot ask for 2FA code")
+    token, chat_id = _get_telegram_creds()
+    if not token or not chat_id:
+        print("[TG] No Telegram credentials — cannot ask for 2FA code")
         return None
 
-    print(f"[2FA] Telegram creds: token=****{tg_token[-4:]}, chat_id={tg_chat_id}")
-
-    # ── Step 1: Pause OpenClaw's Telegram polling ──
-    # This prevents the race condition where OpenClaw consumes our messages
+    # Pause OpenClaw's Telegram polling to prevent getUpdates race
     paused_pids = _stop_openclaw_telegram_polling()
+    time.sleep(2)  # Let any in-flight getUpdates call complete
 
-    # Also check/remove webhook (belt + suspenders)
-    saved_webhook_url = ""
     try:
-        info_resp = requests.get(
-            f"https://api.telegram.org/bot{tg_token}/getWebhookInfo",
-            timeout=5
-        )
-        if info_resp.ok:
-            webhook_info = info_resp.json().get("result", {})
-            saved_webhook_url = webhook_info.get("url", "")
-            if saved_webhook_url:
-                requests.get(
-                    f"https://api.telegram.org/bot{tg_token}/deleteWebhook",
-                    timeout=5
-                )
-                print(f"[2FA] Deleted webhook")
-                time.sleep(1)
-            else:
-                print(f"[2FA] No webhook set (gateway uses long polling)")
-    except Exception as e:
-        print(f"[2FA] Webhook check error: {e}")
+        # Get the latest update_id so we only look at NEW messages
+        try:
+            resp = requests.get(
+                f"https://api.telegram.org/bot{token}/getUpdates",
+                params={"limit": 1, "offset": -1, "timeout": 0},
+                timeout=10
+            )
+            data = resp.json()
+            last_update_id = 0
+            if data.get("ok") and data.get("result"):
+                last_update_id = data["result"][-1]["update_id"]
+            print(f"[TG] Last update_id before asking: {last_update_id}")
+        except Exception as e:
+            print(f"[TG] Failed to get updates baseline: {e}")
+            last_update_id = 0
 
-    # Brief pause after stopping gateway to let any in-flight getUpdates finish
-    time.sleep(2)
-
-    code = None
-    try:
-        # ── Step 2: Send the request to the user ──
+        # Ask the user
         send_telegram(
             "I need your BCBS 2FA verification code. "
             "Check your email for the 6-digit code and reply here with it. "
             "I'll wait up to 5 minutes."
         )
-        print("[2FA] Sent 2FA request via Telegram")
 
-        # ── Step 3: Get baseline update offset ──
-        last_update_id = 0
-        try:
-            resp = requests.get(
-                f"https://api.telegram.org/bot{tg_token}/getUpdates",
-                params={"offset": -1, "limit": 1, "timeout": 0},
-                timeout=5
-            )
-            if resp.ok:
-                result = resp.json()
-                updates = result.get("result", [])
-                if updates:
-                    last_update_id = updates[-1]["update_id"]
-                print(f"[2FA] Baseline: update_id={last_update_id}, ok={result.get('ok')}, count={len(updates)}")
-            else:
-                print(f"[2FA] Baseline failed: HTTP {resp.status_code} — {resp.text[:200]}")
-        except Exception as e:
-            print(f"[2FA] Baseline error: {e}")
-
-        # ── Step 4: Poll for the code ──
-        for attempt in range(60):  # 60 × 5s = 5 minutes
+        # Poll for reply (5 minutes, checking every 5 seconds)
+        for attempt in range(60):
+            time.sleep(5)
             try:
                 resp = requests.get(
-                    f"https://api.telegram.org/bot{tg_token}/getUpdates",
-                    params={
-                        "offset": last_update_id + 1,
-                        "limit": 10,
-                        "timeout": 5,
-                    },
-                    timeout=10
+                    f"https://api.telegram.org/bot{token}/getUpdates",
+                    params={"offset": last_update_id + 1, "timeout": 5},
+                    timeout=15
                 )
-                if resp.ok:
-                    result = resp.json()
-                    updates = result.get("result", [])
+                data = resp.json()
 
-                    # Log first few attempts and any non-empty results
-                    if attempt < 3 or updates:
-                        print(f"[2FA] Poll {attempt+1}: ok={result.get('ok')}, updates={len(updates)}")
+                # Log first few attempts for debugging
+                if attempt < 3:
+                    print(f"[TG] Poll {attempt+1}: ok={data.get('ok')}, updates={len(data.get('result', []))}")
 
-                    for update in updates:
-                        last_update_id = update["update_id"]
-                        msg = update.get("message", {})
-                        text = msg.get("text", "")
-                        chat = msg.get("chat", {})
-                        sender = msg.get("from", {})
-                        msg_chat_id = str(chat.get("id", ""))
-
-                        if text:
-                            print(f"[2FA] Message: chat={msg_chat_id}, "
-                                  f"from={sender.get('first_name', '?')}, "
-                                  f"bot={sender.get('is_bot', '?')}, "
-                                  f"text='{text[:50]}'")
-
-                        # Accept 6-digit code from the target chat (not from bots)
-                        if msg_chat_id == str(tg_chat_id) and not sender.get("is_bot", False):
-                            code_match = re.search(r'\b(\d{6})\b', text)
-                            if code_match:
-                                code = code_match.group(1)
-                                print(f"[2FA] SUCCESS: Got code ****{code[-2:]} from Telegram")
-                                return code
-                else:
-                    err_text = resp.text[:300] if resp.text else "no body"
-                    print(f"[2FA] Poll {attempt+1} failed: HTTP {resp.status_code} — {err_text}")
+                if not data.get("ok"):
                     # 409 = conflict with another getUpdates consumer
-                    if resp.status_code == 409:
-                        print("[2FA] WARNING: 409 Conflict — another process is calling getUpdates!")
-                        time.sleep(2)
-            except requests.exceptions.Timeout:
-                pass
+                    if "409" in str(data):
+                        print(f"[TG] WARNING: 409 Conflict — another process calling getUpdates!")
+                    continue
+
+                for update in data.get("result", []):
+                    msg = update.get("message", {})
+                    # Only accept messages from the right chat
+                    if str(msg.get("chat", {}).get("id")) != str(chat_id):
+                        last_update_id = update["update_id"]
+                        continue
+                    text = (msg.get("text") or "").strip()
+
+                    # Log every message from the right chat
+                    sender = msg.get("from", {})
+                    print(f"[TG] Message from {sender.get('first_name', '?')}: '{text[:50]}'")
+
+                    # Look for a 6-digit code in the reply
+                    match = re.search(r'\b(\d{6})\b', text)
+                    if match:
+                        code = match.group(1)
+                        print(f"[TG] Received 2FA code from user: ****{code[-2:]}")
+                        return code
+                    # Update offset to skip processed messages
+                    last_update_id = update["update_id"]
+
             except Exception as e:
-                print(f"[2FA] Poll error ({attempt+1}): {e}")
-                time.sleep(3)
+                print(f"[TG] Poll error: {e}")
 
-            if attempt % 12 == 11:
-                print(f"[2FA] Still waiting... (~{(attempt+1)*5}s elapsed)")
+            if attempt % 12 == 11:  # Every 60 seconds
+                print(f"[TG] Still waiting for 2FA code... ({(attempt+1)*5}s elapsed)")
 
-        print("[2FA] Timed out waiting for 2FA code (5 minutes)")
+        print("[TG] Timed out waiting for 2FA code from user")
         send_telegram("Timed out waiting for 2FA code. Please try again.")
         return None
 
     finally:
-        # ── Step 5: ALWAYS restore everything ──
-        # Resume gateway first
+        # ALWAYS resume gateway polling
         if paused_pids:
             _resume_openclaw_telegram_polling(paused_pids)
-
-        # Restore webhook if it existed
-        if saved_webhook_url:
-            try:
-                requests.get(
-                    f"https://api.telegram.org/bot{tg_token}/setWebhook",
-                    params={"url": saved_webhook_url},
-                    timeout=10
-                )
-                print(f"[2FA] Restored webhook")
-            except Exception as e:
-                print(f"[2FA] CRITICAL: Failed to restore webhook: {e}")
-
-        # Clean up signal files
-        for cleanup in [TWO_FA_WAITING_FILE, TWO_FA_CODE_FILE]:
-            try:
-                os.remove(cleanup)
-            except FileNotFoundError:
-                pass
 
 
 # ============================================================================
