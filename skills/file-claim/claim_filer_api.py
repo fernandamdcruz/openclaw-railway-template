@@ -468,16 +468,20 @@ async def obtain_oauth_token() -> Optional[str]:
                 await _screenshot(page, "06_2fa_prompt")
 
                 # Try Gmail auto-extraction first (no user interaction needed)
+                # CRITICAL: must use asyncio.to_thread() because these functions
+                # call time.sleep() which blocks the event loop. Blocking the event
+                # loop prevents Playwright's response/request listeners from firing,
+                # so the OAuth token capture callbacks never execute.
                 code = None
                 if get_2fa_code_from_gmail:
-                    code = get_2fa_code_from_gmail(login_epoch)
+                    code = await asyncio.to_thread(get_2fa_code_from_gmail, login_epoch)
                     if code:
                         print(f"[AUTH] Got 2FA code from Gmail: ****{code[-2:]}")
 
                 # Fallback: ask user via Telegram if Gmail extraction failed
                 if not code:
                     print("[AUTH] Gmail auto-extraction failed — asking user via Telegram")
-                    code = ask_telegram_for_2fa()
+                    code = await asyncio.to_thread(ask_telegram_for_2fa)
 
                 if code:
                     print(f"[AUTH] Got 2FA code: ****{code[-2:]}")
@@ -515,7 +519,7 @@ async def obtain_oauth_token() -> Optional[str]:
                                 pass
                         # Fall back to asking the user via Telegram
                         print("[AUTH] Falling back to Telegram for fresh 2FA code")
-                        fallback_code = ask_telegram_for_2fa()
+                        fallback_code = await asyncio.to_thread(ask_telegram_for_2fa)
                         if fallback_code:
                             print(f"[AUTH] Got fallback 2FA code from Telegram: ****{fallback_code[-2:]}")
                             code_input2 = page.locator('input[name="credentials.passcode"]')
@@ -1402,20 +1406,22 @@ TWO_FA_CODE_FILE = "/tmp/.bcbs_2fa_code"
 
 def ask_telegram_for_2fa() -> Optional[str]:
     """
-    Request the 2FA code from the user via Telegram.
+    Request the 2FA code via file-based handoff with FerdyBot.
 
-    Polls BOTH:
-    1. /tmp/.bcbs_2fa_code file (in case FerdyBot writes the code there)
-    2. Telegram getUpdates API directly (in case FerdyBot doesn't write the file)
+    Flow:
+    1. Script creates /tmp/.bcbs_waiting_for_2fa to signal it needs a code
+    2. Script sends a Telegram message asking the user
+    3. FerdyBot sees the user's reply and writes the code to /tmp/.bcbs_2fa_code
+    4. Script reads the code from the file
 
-    There's a race condition with FerdyBot's own getUpdates polling — sometimes
-    FerdyBot will consume the message before we see it. But that's better than
-    the file-only approach which always times out when FerdyBot doesn't write
-    the file (which is most of the time in practice).
+    NOTE: We do NOT poll Telegram's getUpdates API directly — that races with
+    FerdyBot's own getUpdates polling and whichever calls first consumes the
+    message. File-based handoff avoids this race entirely.
+
+    This function uses time.sleep() and MUST be called via asyncio.to_thread()
+    from async code to avoid blocking the event loop.
     """
     import time
-
-    token, chat_id = _get_telegram_creds()
 
     # Clean up stale files from previous runs
     for f in [TWO_FA_WAITING_FILE, TWO_FA_CODE_FILE]:
@@ -1424,39 +1430,22 @@ def ask_telegram_for_2fa() -> Optional[str]:
         except FileNotFoundError:
             pass
 
-    # Signal that we're waiting for a 2FA code (FerdyBot may still write the file)
+    # Signal that we're waiting for a 2FA code
     with open(TWO_FA_WAITING_FILE, "w") as f:
         f.write(f"waiting_since={datetime.now().isoformat()}\n")
-
-    # Get the latest update_id so we only look at NEW messages
-    last_update_id = 0
-    if token and chat_id:
-        try:
-            resp = requests.get(
-                f"https://api.telegram.org/bot{token}/getUpdates",
-                params={"limit": 1, "offset": -1, "timeout": 0},
-                timeout=10
-            )
-            data = resp.json()
-            if data.get("ok") and data.get("result"):
-                last_update_id = data["result"][-1]["update_id"]
-            print(f"[2FA] Telegram baseline update_id: {last_update_id}")
-        except Exception as e:
-            print(f"[2FA] Failed to get Telegram baseline: {e}")
+    print(f"[2FA] Wrote waiting signal to {TWO_FA_WAITING_FILE}")
 
     # Ask the user via Telegram
     send_telegram(
-        "🔐 I need your BCBS 2FA verification code.\n"
-        "Check your email for the 6-digit code and reply here with it.\n"
+        "I need your BCBS 2FA verification code. "
+        "Check your email for the 6-digit code and reply here with it. "
         "I'll wait up to 5 minutes."
     )
-    print("[2FA] Sent 2FA request via Telegram, polling for reply...")
+    print("[2FA] Sent 2FA request via Telegram, polling file for reply...")
 
-    # Poll both file and Telegram (5 minutes, checking every 3 seconds)
+    # Poll for the code file (5 minutes, checking every 3 seconds)
     for attempt in range(100):
         time.sleep(3)
-
-        # Check 1: file-based handoff (FerdyBot may have written it)
         try:
             if os.path.exists(TWO_FA_CODE_FILE):
                 with open(TWO_FA_CODE_FILE, "r") as f:
@@ -1464,7 +1453,7 @@ def ask_telegram_for_2fa() -> Optional[str]:
                 match = re.search(r'\b(\d{6})\b', content)
                 if match:
                     code = match.group(1)
-                    print(f"[2FA] Got code from FILE: ****{code[-2:]}")
+                    print(f"[2FA] Got code from file: ****{code[-2:]}")
                     for cleanup in [TWO_FA_WAITING_FILE, TWO_FA_CODE_FILE]:
                         try:
                             os.remove(cleanup)
@@ -1472,40 +1461,10 @@ def ask_telegram_for_2fa() -> Optional[str]:
                             pass
                     return code
         except Exception as e:
-            pass
-
-        # Check 2: poll Telegram directly
-        if token and chat_id:
-            try:
-                resp = requests.get(
-                    f"https://api.telegram.org/bot{token}/getUpdates",
-                    params={"offset": last_update_id + 1, "timeout": 0, "limit": 10},
-                    timeout=10
-                )
-                data = resp.json()
-                if data.get("ok"):
-                    for update in data.get("result", []):
-                        last_update_id = update["update_id"]
-                        msg = update.get("message", {})
-                        if str(msg.get("chat", {}).get("id")) != str(chat_id):
-                            continue
-                        text = (msg.get("text") or "").strip()
-                        code_match = re.search(r'\b(\d{6})\b', text)
-                        if code_match:
-                            code = code_match.group(1)
-                            print(f"[2FA] Got code from TELEGRAM: ****{code[-2:]}")
-                            for cleanup in [TWO_FA_WAITING_FILE, TWO_FA_CODE_FILE]:
-                                try:
-                                    os.remove(cleanup)
-                                except FileNotFoundError:
-                                    pass
-                            return code
-            except Exception as e:
-                if attempt % 10 == 0:
-                    print(f"[2FA] Telegram poll error: {e}")
+            print(f"[2FA] File poll error: {e}")
 
         if attempt % 20 == 19:  # Every 60 seconds
-            print(f"[2FA] Still waiting for 2FA code... ({(attempt+1)*3}s elapsed)")
+            print(f"[2FA] Still waiting for code file... ({(attempt+1)*3}s elapsed)")
 
     print("[2FA] Timed out waiting for 2FA code (5 minutes)")
     send_telegram("Timed out waiting for 2FA code. Please try again.")
