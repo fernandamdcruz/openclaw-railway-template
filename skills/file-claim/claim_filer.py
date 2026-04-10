@@ -553,36 +553,44 @@ async def close_popup(page: Page) -> None:
 # 2FA — EMAIL CODE RETRIEVAL
 # ============================================================================
 
-def _extract_code_from_response(raw_json: str) -> Optional[str]:
+def _extract_all_codes_from_response(raw_json: str) -> list:
     """
-    Parse gog gmail get JSON response and extract the 2FA code from
-    the NEWEST message in the thread.
+    Parse gog gmail get JSON response and extract ALL 2FA codes.
 
-    STRATEGY: Use re.findall to find ALL verification codes in the output,
-    then take the LAST one. gog returns oldest messages first, so the last
-    code in the output is always the newest. This works regardless of whether
-    JSON parsing succeeds or fails.
+    Returns a list of all verification codes found, in order of appearance.
+    gog returns threads with ALL messages (including trashed ones), so
+    the caller must filter against used_codes to find the fresh one.
     """
     CODE_PATTERN = r'[Vv]erification\s+code\s*:?\s*(\d{6})'
 
-    # ---- Primary approach: findall on ENTIRE raw output, take last ----
     all_codes = re.findall(CODE_PATTERN, raw_json)
     if all_codes:
-        print(f"[2FA] Found {len(all_codes)} verification code(s) in output: "
-              f"{['****' + c[-2:] for c in all_codes]}")
-        print(f"[2FA] Using LAST code (newest): ****{all_codes[-1][-2:]}")
-        return all_codes[-1]
+        # Deduplicate while preserving order
+        seen = set()
+        unique = []
+        for c in all_codes:
+            if c not in seen:
+                seen.add(c)
+                unique.append(c)
+        print(f"[2FA] Found {len(unique)} unique verification code(s) in output: "
+              f"{['****' + c[-2:] for c in unique]}")
+        return unique
 
-    # ---- Fallback: any 6-digit number, take last occurrence ----
-    # Only from the tail to reduce false positives from IDs/timestamps
+    # Fallback: any 6-digit number from tail (reduce false positives)
     all_digits = re.findall(r'\b(\d{6})\b', raw_json[-3000:])
     if all_digits:
+        seen = set()
+        unique = []
+        for c in all_digits:
+            if c not in seen:
+                seen.add(c)
+                unique.append(c)
         print(f"[2FA] No 'verification code' pattern found. "
-              f"Found {len(all_digits)} 6-digit numbers, using last: ****{all_digits[-1][-2:]}")
-        return all_digits[-1]
+              f"Found {len(unique)} unique 6-digit numbers: {['****' + c[-2:] for c in unique]}")
+        return unique
 
     print("[2FA] No verification codes found in output at all")
-    return None
+    return []
 
 
 # --- 2FA code reuse prevention ---
@@ -646,6 +654,8 @@ def get_2fa_code_from_gmail(login_epoch: int = 0) -> Optional[str]:
     base_query = "from:noreply@bcbsglobalsolutions.com verification code"
     search_query = f"{base_query} newer_than:2m"
     print(f"[2FA] Using newer_than:2m filter (login epoch: {login_epoch})")
+
+    stale_only_count = 0  # bail fast if we keep finding only used codes
 
     # Wait 15s on the first attempt to give the email time to arrive
     print("[2FA] Waiting 15s for verification email to arrive...")
@@ -740,7 +750,11 @@ def get_2fa_code_from_gmail(login_epoch: int = 0) -> Optional[str]:
                             _try_trash_email(str(eid))
                     return code
                 else:
-                    print(f"[2FA] Found {len(all_snippet_codes)} code(s) but ALL are previously used — waiting for fresh email")
+                    stale_only_count += 1
+                    print(f"[2FA] Found {len(all_snippet_codes)} code(s) but ALL previously used (stale attempt {stale_only_count}/3)")
+                    if stale_only_count >= 3:
+                        print("[2FA] Giving up on Gmail — only stale codes after 3 attempts, falling back to Telegram")
+                        return None
                     if attempt < 17:
                         time.sleep(5)
                     continue
@@ -761,20 +775,27 @@ def get_2fa_code_from_gmail(login_epoch: int = 0) -> Optional[str]:
                 print(f"[2FA] get (id={lookup_id}) exit code: {get_result.returncode}")
                 print(f"[2FA] get stdout (first 500 chars): {get_result.stdout[:500]}")
 
-            # STEP 4: Parse the JSON response to find the newest message body
+            # STEP 4: Parse the JSON response — extract ALL codes, filter used
             full_output = get_result.stdout
-            code = _extract_code_from_response(full_output)
-            if code:
-                if code in used_codes:
-                    print(f"[2FA] Extracted code ****{code[-2:]} but it was already used — waiting for fresh email")
+            all_codes = _extract_all_codes_from_response(full_output)
+            if all_codes:
+                fresh = [c for c in all_codes if c not in used_codes]
+                if fresh:
+                    code = fresh[-1]  # last unused = newest
+                    print(f"[2FA] {len(all_codes)} code(s) total, {len(fresh)} fresh — using ****{code[-2:]}")
+                    _mark_code_used(code)
+                    if lookup_id:
+                        _try_trash_email(str(lookup_id))
+                    return code
+                else:
+                    stale_only_count += 1
+                    print(f"[2FA] {len(all_codes)} code(s) but ALL previously used (stale attempt {stale_only_count}/3)")
+                    if stale_only_count >= 3:
+                        print("[2FA] Giving up on Gmail — only stale codes after 3 attempts, falling back to Telegram")
+                        return None
                     if attempt < 17:
                         time.sleep(5)
                     continue
-                print(f"[2FA] Extracted code: ****{code[-2:]}")
-                _mark_code_used(code)
-                if lookup_id:
-                    _try_trash_email(str(lookup_id))
-                return code
 
             if attempt == 0:
                 print(f"[2FA] Could not extract code from response")
