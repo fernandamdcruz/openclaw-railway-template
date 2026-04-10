@@ -586,7 +586,7 @@ def _extract_code_from_response(raw_json: str) -> Optional[str]:
 
 
 # --- 2FA code reuse prevention ---
-_USED_CODES_FILE = "/tmp/bcbs_2fa_used_codes.txt"
+_USED_CODES_FILE = os.environ.get("OPENCLAW_STATE_DIR", "/data/.openclaw") + "/bcbs_2fa_used_codes.txt"
 
 
 def _load_used_codes() -> set:
