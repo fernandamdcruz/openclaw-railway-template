@@ -499,6 +499,48 @@ async def obtain_oauth_token() -> Optional[str]:
                     except Exception:
                         pass  # networkidle may not fire if SPA keeps polling
                     await asyncio.sleep(5)
+
+                    # Handle "Keep me signed in" interstitial (Okta post-2FA)
+                    page_text_post_2fa = await page.text_content("body") or ""
+                    if "keep me signed in" in page_text_post_2fa.lower() or "stay signed in" in page_text_post_2fa.lower():
+                        print("[AUTH] 'Keep me signed in' interstitial detected — clicking through")
+                        await _screenshot(page, "07_keep_signed_in")
+                        dont_stay = page.get_by_role("link", name=re.compile("don.*stay signed in", re.IGNORECASE))
+                        stay = page.get_by_role("link", name=re.compile("^stay signed in$", re.IGNORECASE))
+                        dont_stay_btn = page.get_by_role("button", name=re.compile("don.*stay signed in", re.IGNORECASE))
+                        stay_btn = page.get_by_role("button", name=re.compile("^stay signed in$", re.IGNORECASE))
+
+                        clicked = False
+                        for label, el in [("Don't stay (link)", dont_stay), ("Don't stay (button)", dont_stay_btn),
+                                          ("Stay (link)", stay), ("Stay (button)", stay_btn)]:
+                            if await el.count() > 0:
+                                await el.first.click()
+                                print(f"[AUTH] Clicked '{label}'")
+                                clicked = True
+                                break
+
+                        if not clicked:
+                            print("[AUTH] No matching role element, trying text selector")
+                            for text_sel in ["text=/Don.t stay signed in/i", "text=/Stay signed in/i"]:
+                                el = page.locator(text_sel)
+                                if await el.count() > 0:
+                                    await el.first.click()
+                                    print(f"[AUTH] Clicked via text selector: {text_sel}")
+                                    clicked = True
+                                    break
+
+                        if not clicked:
+                            print("[AUTH] WARNING: Could not click through 'Keep me signed in' interstitial")
+                            await _dump_page_state(page, "keep-signed-in-stuck")
+
+                        await asyncio.sleep(5)
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=15000)
+                        except Exception:
+                            pass
+                        await _screenshot(page, "08_after_keep_signed_in")
+                        print(f"[AUTH] After interstitial, URL: {page.url}")
+
                 else:
                     print("[AUTH] Could not get 2FA code — aborting")
                     return None
