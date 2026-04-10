@@ -1402,19 +1402,20 @@ TWO_FA_CODE_FILE = "/tmp/.bcbs_2fa_code"
 
 def ask_telegram_for_2fa() -> Optional[str]:
     """
-    Request the 2FA code via file-based handoff with FerdyBot.
+    Request the 2FA code from the user via Telegram.
 
-    The script does NOT poll Telegram directly — that races with FerdyBot's
-    own getUpdates calls, causing one to "eat" the message before the other
-    sees it. This is why the 2FA code appeared to be ignored.
+    Polls BOTH:
+    1. /tmp/.bcbs_2fa_code file (in case FerdyBot writes the code there)
+    2. Telegram getUpdates API directly (in case FerdyBot doesn't write the file)
 
-    Instead:
-    1. Script writes /tmp/.bcbs_waiting_for_2fa to signal it needs a code
-    2. Script sends a Telegram message asking the user
-    3. FerdyBot sees the user's reply and writes the code to /tmp/.bcbs_2fa_code
-    4. Script reads the code from the file
+    There's a race condition with FerdyBot's own getUpdates polling — sometimes
+    FerdyBot will consume the message before we see it. But that's better than
+    the file-only approach which always times out when FerdyBot doesn't write
+    the file (which is most of the time in practice).
     """
     import time
+
+    token, chat_id = _get_telegram_creds()
 
     # Clean up stale files from previous runs
     for f in [TWO_FA_WAITING_FILE, TWO_FA_CODE_FILE]:
@@ -1423,21 +1424,39 @@ def ask_telegram_for_2fa() -> Optional[str]:
         except FileNotFoundError:
             pass
 
-    # Signal that we're waiting for a 2FA code
+    # Signal that we're waiting for a 2FA code (FerdyBot may still write the file)
     with open(TWO_FA_WAITING_FILE, "w") as f:
         f.write(f"waiting_since={datetime.now().isoformat()}\n")
-    print(f"[2FA] Wrote waiting signal to {TWO_FA_WAITING_FILE}")
+
+    # Get the latest update_id so we only look at NEW messages
+    last_update_id = 0
+    if token and chat_id:
+        try:
+            resp = requests.get(
+                f"https://api.telegram.org/bot{token}/getUpdates",
+                params={"limit": 1, "offset": -1, "timeout": 0},
+                timeout=10
+            )
+            data = resp.json()
+            if data.get("ok") and data.get("result"):
+                last_update_id = data["result"][-1]["update_id"]
+            print(f"[2FA] Telegram baseline update_id: {last_update_id}")
+        except Exception as e:
+            print(f"[2FA] Failed to get Telegram baseline: {e}")
 
     # Ask the user via Telegram
     send_telegram(
-        "I need your BCBS 2FA verification code. "
-        "Check your email for the 6-digit code and reply here with it. "
+        "🔐 I need your BCBS 2FA verification code.\n"
+        "Check your email for the 6-digit code and reply here with it.\n"
         "I'll wait up to 5 minutes."
     )
+    print("[2FA] Sent 2FA request via Telegram, polling for reply...")
 
-    # Poll for the code file (5 minutes, checking every 3 seconds)
+    # Poll both file and Telegram (5 minutes, checking every 3 seconds)
     for attempt in range(100):
         time.sleep(3)
+
+        # Check 1: file-based handoff (FerdyBot may have written it)
         try:
             if os.path.exists(TWO_FA_CODE_FILE):
                 with open(TWO_FA_CODE_FILE, "r") as f:
@@ -1445,8 +1464,7 @@ def ask_telegram_for_2fa() -> Optional[str]:
                 match = re.search(r'\b(\d{6})\b', content)
                 if match:
                     code = match.group(1)
-                    print(f"[2FA] Received code from file: ****{code[-2:]}")
-                    # Clean up
+                    print(f"[2FA] Got code from FILE: ****{code[-2:]}")
                     for cleanup in [TWO_FA_WAITING_FILE, TWO_FA_CODE_FILE]:
                         try:
                             os.remove(cleanup)
@@ -1454,18 +1472,48 @@ def ask_telegram_for_2fa() -> Optional[str]:
                             pass
                     return code
         except Exception as e:
-            print(f"[2FA] File poll error: {e}")
+            pass
+
+        # Check 2: poll Telegram directly
+        if token and chat_id:
+            try:
+                resp = requests.get(
+                    f"https://api.telegram.org/bot{token}/getUpdates",
+                    params={"offset": last_update_id + 1, "timeout": 0, "limit": 10},
+                    timeout=10
+                )
+                data = resp.json()
+                if data.get("ok"):
+                    for update in data.get("result", []):
+                        last_update_id = update["update_id"]
+                        msg = update.get("message", {})
+                        if str(msg.get("chat", {}).get("id")) != str(chat_id):
+                            continue
+                        text = (msg.get("text") or "").strip()
+                        code_match = re.search(r'\b(\d{6})\b', text)
+                        if code_match:
+                            code = code_match.group(1)
+                            print(f"[2FA] Got code from TELEGRAM: ****{code[-2:]}")
+                            for cleanup in [TWO_FA_WAITING_FILE, TWO_FA_CODE_FILE]:
+                                try:
+                                    os.remove(cleanup)
+                                except FileNotFoundError:
+                                    pass
+                            return code
+            except Exception as e:
+                if attempt % 10 == 0:
+                    print(f"[2FA] Telegram poll error: {e}")
 
         if attempt % 20 == 19:  # Every 60 seconds
-            print(f"[2FA] Still waiting for code file... ({(attempt+1)*3}s elapsed)")
+            print(f"[2FA] Still waiting for 2FA code... ({(attempt+1)*3}s elapsed)")
 
-    print("[2FA] Timed out waiting for 2FA code")
+    print("[2FA] Timed out waiting for 2FA code (5 minutes)")
     send_telegram("Timed out waiting for 2FA code. Please try again.")
-    # Clean up
-    try:
-        os.remove(TWO_FA_WAITING_FILE)
-    except FileNotFoundError:
-        pass
+    for cleanup in [TWO_FA_WAITING_FILE, TWO_FA_CODE_FILE]:
+        try:
+            os.remove(cleanup)
+        except FileNotFoundError:
+            pass
     return None
 
 
