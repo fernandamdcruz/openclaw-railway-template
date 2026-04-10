@@ -70,6 +70,7 @@ RUN apt-get update \
  # Chromium/Homebrew/gogcli layers above. This keeps rebuilds under 30s.
  COPY skills ./skills
 COPY TOOLS.md ./TOOLS.md
+COPY receipt_sheet_template.py ./receipt_sheet_template.py
 
  USER root
  ENTRYPOINT ["./entrypoint.sh"]

@@ -91,11 +91,16 @@ if [ ! -d /data/.linuxbrew ]; then
  echo "[entrypoint] Skills deployed to $SKILLS_DEST"
  fi
 
- # Deploy TOOLS.md from Docker image to workspace volume
+ # Deploy TOOLS.md and receipt template from Docker image to workspace volume
  if [ -f /app/TOOLS.md ]; then
  cp -f /app/TOOLS.md /data/workspace/TOOLS.md
  chown openclaw:openclaw /data/workspace/TOOLS.md 2>/dev/null || true
  echo "[entrypoint] TOOLS.md deployed to /data/workspace/TOOLS.md"
+ fi
+ if [ -f /app/receipt_sheet_template.py ]; then
+ cp -f /app/receipt_sheet_template.py /data/workspace/receipt_sheet_template.py
+ chown openclaw:openclaw /data/workspace/receipt_sheet_template.py 2>/dev/null || true
+ echo "[entrypoint] receipt_sheet_template.py deployed to /data/workspace/"
  fi
 
  # Self-healing: ensure gog is installed (survives volume wipes)
