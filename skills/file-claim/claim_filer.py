@@ -640,16 +640,12 @@ def get_2fa_code_from_gmail(login_epoch: int = 0) -> Optional[str]:
         print(f"[2FA] Previously used codes to skip: {['****' + c[-2:] for c in used_codes]}")
 
     # Build the Gmail search query with a time filter
-    # Gmail's `after:` operator takes a unix epoch timestamp
+    # Use newer_than:2m for reliable time filtering — the 2FA email
+    # should arrive within ~30s of login, so 2m is generous.
+    # (Gmail's `after:` with epoch seconds is unreliable via gog CLI.)
     base_query = "from:noreply@bcbsglobalsolutions.com verification code"
-    if login_epoch > 0:
-        # Subtract 30s buffer in case of clock drift
-        after_ts = login_epoch - 30
-        search_query = f"{base_query} after:{after_ts}"
-        print(f"[2FA] Only accepting emails after epoch {after_ts} (login was at {login_epoch})")
-    else:
-        search_query = f"{base_query} newer_than:5m"
-        print("[2FA] No login epoch provided, using newer_than:5m")
+    search_query = f"{base_query} newer_than:2m"
+    print(f"[2FA] Using newer_than:2m filter (login epoch: {login_epoch})")
 
     # Wait 15s on the first attempt to give the email time to arrive
     print("[2FA] Waiting 15s for verification email to arrive...")

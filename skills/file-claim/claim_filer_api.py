@@ -500,6 +500,43 @@ async def obtain_oauth_token() -> Optional[str]:
                         pass  # networkidle may not fire if SPA keeps polling
                     await asyncio.sleep(5)
 
+                    # Check if the code was rejected
+                    page_text_after_code = await page.text_content("body") or ""
+                    if "invalid code" in page_text_after_code.lower() or "try again" in page_text_after_code.lower():
+                        print(f"[AUTH] 2FA code ****{code[-2:]} was REJECTED by BCBS")
+                        await _screenshot(page, "07_invalid_code")
+                        # Mark this code as used so it won't be tried again
+                        if get_2fa_code_from_gmail:
+                            # Import the mark function from claim_filer
+                            try:
+                                from claim_filer import _mark_code_used
+                                _mark_code_used(code)
+                            except ImportError:
+                                pass
+                        # Fall back to asking the user via Telegram
+                        print("[AUTH] Falling back to Telegram for fresh 2FA code")
+                        fallback_code = ask_telegram_for_2fa()
+                        if fallback_code:
+                            print(f"[AUTH] Got fallback 2FA code from Telegram: ****{fallback_code[-2:]}")
+                            code_input2 = page.locator('input[name="credentials.passcode"]')
+                            if await code_input2.count() == 0:
+                                code_input2 = page.locator('input[type="tel"]')
+                            if await code_input2.count() == 0:
+                                code_input2 = page.get_by_role("textbox")
+                            await code_input2.first.fill(fallback_code)
+                            verify_btn2 = page.locator('input[type="submit"]')
+                            await verify_btn2.click()
+                            print("[AUTH] Fallback 2FA code submitted")
+                            await asyncio.sleep(10)
+                            try:
+                                await page.wait_for_load_state("networkidle", timeout=15000)
+                            except Exception:
+                                pass
+                            await asyncio.sleep(5)
+                        else:
+                            print("[AUTH] No fallback code received — aborting")
+                            return None
+
                     # Handle "Keep me signed in" interstitial (Okta post-2FA)
                     page_text_post_2fa = await page.text_content("body") or ""
                     if "keep me signed in" in page_text_post_2fa.lower() or "stay signed in" in page_text_post_2fa.lower():
