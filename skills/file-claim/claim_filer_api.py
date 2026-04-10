@@ -299,15 +299,6 @@ async def obtain_oauth_token() -> Optional[str]:
         print("[AUTH] Playwright not installed — cannot obtain token")
         return None
 
-    # Import 2FA helper from the Playwright script (same directory)
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    sys.path.insert(0, script_dir)
-    try:
-        from claim_filer import get_2fa_code_from_gmail
-    except ImportError:
-        print("[AUTH] Could not import get_2fa_code_from_gmail — 2FA will fail")
-        get_2fa_code_from_gmail = None
-
     captured_token = {"value": None}
     captured_auth_code = {"value": None, "url": None}
     captured_pkce = {"code_verifier": None}
@@ -464,28 +455,25 @@ async def obtain_oauth_token() -> Optional[str]:
             page_text = await page.text_content("body") or ""
 
             if "verification" in page_text.lower() or "code" in page_text.lower() or "factor" in page_text.lower():
-                print("[AUTH] 2FA detected — trying auto-extraction from Gmail first")
+                print("[AUTH] 2FA detected — asking user for code via Telegram")
                 await _screenshot(page, "06_2fa_prompt")
 
-                # Try Gmail auto-extraction first (no user interaction needed)
-                # CRITICAL: must use asyncio.to_thread() because these functions
-                # call time.sleep() which blocks the event loop. Blocking the event
-                # loop prevents Playwright's response/request listeners from firing,
-                # so the OAuth token capture callbacks never execute.
-                code = None
-                if get_2fa_code_from_gmail:
-                    code = await asyncio.to_thread(get_2fa_code_from_gmail, login_epoch)
-                    if code:
-                        print(f"[AUTH] Got 2FA code from Gmail: ****{code[-2:]}")
+                # Ask user for the 2FA code via Telegram (direct getUpdates polling).
+                # We tried auto-extracting from Gmail but it was unreliable (stale codes,
+                # gog CLI ignoring time filters, thread grouping). See FERDY_README.md
+                # "2FA Debugging History" section for details.
+                # CRITICAL: must use asyncio.to_thread() because ask_telegram_for_2fa()
+                # calls time.sleep() which would block the event loop and prevent
+                # Playwright's response/request listeners from capturing the OAuth token.
+                code = await asyncio.to_thread(ask_telegram_for_2fa)
 
-                # Fallback: ask user via Telegram if Gmail extraction failed
                 if not code:
-                    print("[AUTH] Gmail auto-extraction failed — asking user via Telegram")
-                    code = await asyncio.to_thread(ask_telegram_for_2fa)
+                    print("[AUTH] No 2FA code received — aborting")
+                    return None
 
-                if code:
-                    print(f"[AUTH] Got 2FA code: ****{code[-2:]}")
-                    # Find the verification code input
+                # Enter and submit the code (up to 2 attempts)
+                for attempt_num in range(2):
+                    print(f"[AUTH] Entering 2FA code: ****{code[-2:]} (attempt {attempt_num + 1})")
                     code_input = page.locator('input[name="credentials.passcode"]')
                     if await code_input.count() == 0:
                         code_input = page.locator('input[type="tel"]')
@@ -497,49 +485,31 @@ async def obtain_oauth_token() -> Optional[str]:
                     await verify_btn.click()
                     print("[AUTH] 2FA code submitted")
                     await asyncio.sleep(10)
-                    # Wait for the redirect chain to complete
                     try:
                         await page.wait_for_load_state("networkidle", timeout=15000)
                     except Exception:
-                        pass  # networkidle may not fire if SPA keeps polling
+                        pass
                     await asyncio.sleep(5)
 
                     # Check if the code was rejected
                     page_text_after_code = await page.text_content("body") or ""
                     if "invalid code" in page_text_after_code.lower() or "try again" in page_text_after_code.lower():
-                        print(f"[AUTH] 2FA code ****{code[-2:]} was REJECTED by BCBS")
+                        print(f"[AUTH] 2FA code ****{code[-2:]} was REJECTED")
                         await _screenshot(page, "07_invalid_code")
-                        # Mark this code as used so it won't be tried again
-                        if get_2fa_code_from_gmail:
-                            # Import the mark function from claim_filer
-                            try:
-                                from claim_filer import _mark_code_used
-                                _mark_code_used(code)
-                            except ImportError:
-                                pass
-                        # Fall back to asking the user via Telegram
-                        print("[AUTH] Falling back to Telegram for fresh 2FA code")
-                        fallback_code = await asyncio.to_thread(ask_telegram_for_2fa)
-                        if fallback_code:
-                            print(f"[AUTH] Got fallback 2FA code from Telegram: ****{fallback_code[-2:]}")
-                            code_input2 = page.locator('input[name="credentials.passcode"]')
-                            if await code_input2.count() == 0:
-                                code_input2 = page.locator('input[type="tel"]')
-                            if await code_input2.count() == 0:
-                                code_input2 = page.get_by_role("textbox")
-                            await code_input2.first.fill(fallback_code)
-                            verify_btn2 = page.locator('input[type="submit"]')
-                            await verify_btn2.click()
-                            print("[AUTH] Fallback 2FA code submitted")
-                            await asyncio.sleep(10)
-                            try:
-                                await page.wait_for_load_state("networkidle", timeout=15000)
-                            except Exception:
-                                pass
-                            await asyncio.sleep(5)
+                        if attempt_num == 0:
+                            # Ask for a new code
+                            send_telegram("That code was rejected. Please send a new 6-digit code.")
+                            code = await asyncio.to_thread(ask_telegram_for_2fa)
+                            if not code:
+                                print("[AUTH] No retry code received — aborting")
+                                return None
+                            continue
                         else:
-                            print("[AUTH] No fallback code received — aborting")
+                            print("[AUTH] 2FA failed twice — aborting")
                             return None
+                    else:
+                        # Code accepted, break out of retry loop
+                        break
 
                     # Handle "Keep me signed in" interstitial (Okta post-2FA)
                     page_text_post_2fa = await page.text_content("body") or ""

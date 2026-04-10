@@ -685,3 +685,64 @@ What this script does:
 - Ensures every browser profile has a `color` field (prevents gateway crash-loop)
 - Removes old `compaction.mode` key (it was invalid)
 - Removes old `session.reset` block (replaced by legacy path)
+
+---
+
+## 2FA Debugging History (2026-04-10)
+
+### The Problem
+
+The BCBS claim filing script (`skills/file-claim/claim_filer_api.py`) automates login via Okta SSO, which requires email-based 2FA. The script needs to obtain a 6-digit verification code sent to Gmail, enter it into the Okta form, and capture the resulting OAuth token.
+
+### What Was Tried (and Why Each Failed)
+
+#### Attempt 1: Gmail Auto-Extraction via `gog` CLI
+- **Approach**: Use `gog gmail search` + `gog gmail get` to find the 2FA email and extract the code
+- **Failures**:
+  - `gog` CLI ignores `after:{epoch}` time filters — returns emails from hours ago
+  - `newer_than:2m` filter also unreliable — old emails still returned
+  - Gmail threads group ALL BCBS verification emails together (including trashed ones), so `gog gmail get {threadId}` returns every code ever sent
+  - Added used-codes tracking (`/data/.openclaw/bcbs_2fa_used_codes.txt`) and `-in:trash -in:spam` filters, but stale codes still leaked through
+  - The `stale_only_count` bail-out (originally 3 attempts = ~30s) was too aggressive — fresh email hadn't arrived yet
+
+#### Attempt 2: Telegram File-Based Handoff with FerdyBot
+- **Approach**: Script creates `/tmp/.bcbs_waiting_for_2fa`, sends Telegram message asking for code, FerdyBot sees the user's reply and writes code to `/tmp/.bcbs_2fa_code`, script reads from file
+- **Failure**: FerdyBot is **blocked** waiting for the Python subprocess to complete. While the script runs, FerdyBot cannot process Telegram messages, so it never writes the code to the file. This is a fundamental architectural limitation — the script and FerdyBot share the same execution context.
+
+#### Attempt 3: Direct Telegram `getUpdates` Polling
+- **Approach**: Script polls Telegram's `getUpdates` API directly during execution
+- **Initial concern**: Race condition with FerdyBot's own polling — `getUpdates` is destructive (whichever consumer calls first "claims" the messages)
+- **Realization**: During script execution, FerdyBot IS blocked, so there's no race. The script is the only consumer.
+- **Outcome**: Added to `ask_telegram_for_2fa()` — this approach is architecturally sound but was added alongside the Gmail extraction which kept failing before it could be reached.
+
+#### Attempt 4: `asyncio.to_thread()` Fix
+- **Problem discovered**: `get_2fa_code_from_gmail()` uses `time.sleep()` inside an async function, blocking the entire event loop. Playwright's response listeners (which capture the OAuth token) cannot fire while the event loop is frozen.
+- **Fix**: Wrapped all sync calls in `asyncio.to_thread()` so they run in a thread pool
+- **Outcome**: Fixed the event loop blocking, but Gmail extraction still returned stale codes
+
+### Current State (2026-04-10)
+
+**Gmail auto-extraction has been removed from the auth flow.** The script now:
+1. Detects 2FA prompt on the Okta page
+2. Immediately asks the user for the code via Telegram (direct `getUpdates` polling)
+3. User replies with 6-digit code on Telegram
+4. Script enters the code and submits
+5. If rejected, asks for a new code (one retry)
+
+The Gmail extraction code still exists in `claim_filer.py` but is no longer imported or called.
+
+### Other Fixes Made During This Session
+
+- **Secondary document upload**: Column P (`secondary_doc`) from Google Sheets was being parsed but never uploaded. Added Step 4b to upload secondary documents after the primary doc.
+- **"Keep me signed in" interstitial**: Okta shows this page after 2FA — script now detects and clicks through it.
+- **Multiple login buttons**: BCBS landing page has 2 "Login" buttons — fixed with `.first.click()`.
+- **Runtime pip install anti-pattern**: Scripts were running `pip install` at startup. Fixed by adding `requests PyMuPDF` to the Dockerfile and replacing auto-install with clean error + exit.
+- **Used codes file in /tmp**: Was wiped on every Railway redeploy. Moved to persistent `/data/.openclaw/` volume.
+
+### Future: If Revisiting Gmail Auto-Extraction
+
+If you want to try auto-extraction again, the key problems to solve are:
+1. **Gmail thread grouping**: All BCBS verification emails land in the same thread. Need to either use individual message IDs (not thread IDs) or find a way to get gog to return only the newest message in a thread.
+2. **Reliable time filtering**: gog CLI doesn't honor `after:` or `newer_than:` reliably. May need to use Gmail API directly via OAuth instead of gog.
+3. **Code timing**: The 2FA email takes 30-60 seconds to arrive. Any extraction approach must wait at least 60 seconds before bailing.
+4. **Event loop**: Any sync blocking code (time.sleep) MUST be wrapped in `asyncio.to_thread()` to keep Playwright's listeners alive.
