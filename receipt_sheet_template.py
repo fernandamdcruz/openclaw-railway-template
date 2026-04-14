@@ -37,7 +37,7 @@ assert len(row[0]) == 18, f"BUG: {len(row[0])} cols."
 sheets.spreadsheets().values().append(
     spreadsheetId='1wU7iuAH7mZdenIKNAyrUFuJkVjZsYjxeL07NzqUwMYk',
     range='2026!A:R',
-    valueInputOption='RAW',
+    valueInputOption='USER_ENTERED',
     insertDataOption='INSERT_ROWS',
     body={'values': row}).execute()
 print(f"OK: {len(row[0])} columns written as one row")
