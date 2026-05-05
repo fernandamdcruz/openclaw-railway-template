@@ -356,6 +356,21 @@ def generate_dae(page: Page, competencia: str, live_view_url: str) -> Optional[d
     page.screenshot(path="/tmp/esocial_04_folha.png")
     print(f"[DAE] Folha page URL: {page.url}")
 
+    # Dismiss "Atenção" modal that appears on first load
+    # ("Certifique-se de que você realizou o lançamento de todos os eventos do mês...")
+    # The modal's jQuery UI overlay (.ui-widget-overlay) blocks all clicks until dismissed.
+    print("[DAE] Checking for 'Atenção' modal...")
+    try:
+        ok_btn = page.locator(".ui-dialog button:has-text('Ok'), .ui-dialog-buttonset button:has-text('Ok')").first
+        if ok_btn.is_visible(timeout=3000):
+            ok_btn.click()
+            print("[DAE] Dismissed 'Atenção' modal")
+            # Wait for the overlay to fully disappear
+            page.locator(".ui-widget-overlay").wait_for(state="hidden", timeout=5000)
+            time.sleep(1)
+    except Exception as e:
+        print(f"[DAE] No 'Atenção' modal (or already dismissed): {e}")
+
     # Step 5: Select year tab if needed
     print(f"[DAE] Selecting year {year_str}...")
     try:
