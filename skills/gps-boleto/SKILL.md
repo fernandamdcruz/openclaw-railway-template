@@ -6,34 +6,40 @@ Generate monthly GPS (Guia da Previdência Social) boletos for Fernanda and Max 
 ## Trigger
 Say "GPS boleto", "gerar GPS", "boleto previdência", or similar. Also triggered by the monthly cron job on the 5th.
 
-## Availability Check (cron trigger only)
+## 🛑 STOP — READ THIS FIRST IF TRIGGERED BY CRON
 
-When this skill is triggered by the **monthly cron job** (NOT when Fernanda asks manually):
+**If you got here from the monthly cron job (NOT a direct chat message from Fernanda):**
 
-1. **Ask first — do NOT run the script yet.**
-   Send via Telegram (chat ID: 8409634074):
-   ```
-   GPS boleto time! Competência: [previous month/year].
-   Preciso da sua ajuda para resolver o CAPTCHA no portal SAL.
-   Agora é um bom momento? Responda:
-   • "sim" — começo agora
-   • "depois" — pergunto de novo em 12h
-   • "dispensar" — cancelo o lembrete deste mês
-   ```
+❌ **DO NOT run the Python script yet.**
+❌ **DO NOT open a browser.**
+❌ **DO NOT navigate to the SAL portal.**
+❌ **DO NOT create a Browserbase session.**
 
-2. **If Fernanda replies "sim" / "yes" / affirmative** → proceed to run the script below.
+Doing any of the above BEFORE Fernanda confirms availability **burns Browserbase minutes from our 60/month budget for nothing**, because the CAPTCHA times out without her.
 
-3. **If no response within 30 minutes, OR she replies "depois" / "later":**
-   - Reply: "OK! Pergunto de novo em 12 horas."
-   - Wait 12 hours, then re-send the availability message (step 1).
+### Step 1: Send the availability message via Telegram
 
-4. **Reminder loop**: Keep re-asking every 12 hours until she either says "sim" or "dispensar".
+You **CAN** send Telegram messages from cron context. Anyone who claims otherwise is wrong. Use this exact bash command:
 
-5. **If she replies "dispensar" / "dismiss" / "cancelar":**
-   - Reply: "OK, GPS [month] não será gerado automaticamente. Diga 'GPS boleto' quando quiser gerar manualmente."
-   - Stop all reminders for this month.
+```bash
+curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+  -d "chat_id=8409634074" \
+  -d "text=GPS boleto time! Competência: [PREVIOUS_MONTH/YEAR]. Preciso da sua ajuda para resolver o CAPTCHA no portal SAL. Agora é um bom momento? Responda: 'sim' (começo agora), 'depois' (pergunto em 12h), ou 'dispensar' (cancelo este mês)."
+```
 
-**When triggered manually** (Fernanda says "GPS boleto" in chat): skip this section entirely — she's available. Go straight to running the script.
+Replace `[PREVIOUS_MONTH/YEAR]` with the actual competência (e.g. `04/2026` if running in May).
+
+### Step 2: STOP the cron job here.
+
+Do **not** wait, do **not** poll, do **not** run anything else. Exit the cron job after sending the message. When Fernanda replies in Telegram, that triggers a NEW conversation where you'll handle her response.
+
+### Step 3 (in the NEW conversation when Fernanda replies):
+
+- **"sim" / "yes" / "vamos" / affirmative** → run the Python script (see "How to Run" below)
+- **"depois" / "later" / "mais tarde"** → reply "OK! Pergunto de novo em 12h." and stop. (A future cron will re-ask.)
+- **"dispensar" / "cancelar" / "skip"** → reply "OK, GPS [month] cancelado. Diga 'GPS boleto' quando quiser gerar manualmente." and stop.
+
+**When triggered manually** (Fernanda types "GPS boleto" in chat): skip this entire STOP section — she's already available and confirmed by virtue of asking. Go straight to running the script.
 
 ## CRITICAL: Browserbase Budget
 
