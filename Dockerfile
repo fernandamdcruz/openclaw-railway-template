@@ -19,6 +19,12 @@ RUN apt-get update \
  # Install Python Playwright for claim_filer.py
  RUN pip install --break-system-packages playwright requests PyMuPDF
 
+ # Install Python Playwright's Chromium browser to the shared cache directory
+ # (Node.js Playwright below installs separately to the same dir, side-by-side)
+ RUN mkdir -p /home/openclaw/.cache/ms-playwright && \
+     PLAYWRIGHT_BROWSERS_PATH=/home/openclaw/.cache/ms-playwright \
+     python3 -m playwright install --with-deps chromium
+
  RUN npm install -g openclaw@2026.3.13 clawhub@latest
 
  WORKDIR /app
@@ -42,10 +48,9 @@ RUN apt-get update \
  && mkdir -p /data && chown openclaw:openclaw /data \
  && mkdir -p /home/linuxbrew/.linuxbrew && chown -R openclaw:openclaw /home/linuxbrew \
  && if [ -d /home/node/.cache/ms-playwright ]; then \
- mkdir -p /home/openclaw/.cache && \
- cp -a /home/node/.cache/ms-playwright /home/openclaw/.cache/ms-playwright && \
- chown -R openclaw:openclaw /home/openclaw/.cache; \
- fi
+ cp -an /home/node/.cache/ms-playwright/. /home/openclaw/.cache/ms-playwright/; \
+ fi \
+ && chown -R openclaw:openclaw /home/openclaw/.cache
 
  USER openclaw
  RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
