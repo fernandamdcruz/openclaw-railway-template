@@ -17,3 +17,10 @@ npm-debug.log*
 .claude/
 .serena/
 .tmpdata/openclaw-railway-template/
+
+# Python
+__pycache__/
+*.pyc
+
+# Cross-project contamination (Netlify is a different project)
+.netlify/

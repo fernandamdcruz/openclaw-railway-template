@@ -1,144 +1,152 @@
-# OpenClaw Railway Template
+# FerdyBot — Personal AI Assistant for Fernanda
 
-## Security Notice
+Telegram-based assistant that handles Fernanda's administrative chores: filing medical insurance claims, generating Brazilian tax/social-security boletos, and processing receipts.
 
-> **This template exposes your OpenClaw gateway to the public internet.** **Please read the [OpenClaw security documentation](https://docs.openclaw.ai/gateway/security) before deploying** to understand the risks and recommended configuration. If you only use chat channels (Telegram, Discord, Slack) and don't need the gateway dashboard, you can remove the public endpoint from Railway after setup.
+Built on **OpenClaw** (an agent framework) deployed on **Railway**. Talks to Telegram, runs Python skills, drives browsers when needed.
 
-<img width="1860" height="2624" alt="CleanShot 2026-02-23 at 21 59 06@2x" src="https://github.com/user-attachments/assets/2605d44c-4319-4e92-838c-3caa726b9595" />
+---
 
-## What you get
+## What FerdyBot does
 
-- **OpenClaw Gateway + Control UI** (served at `/` and `/openclaw`)
-- A friendly **Setup Wizard** at `/setup` (protected by a password)
-- Optional **Web Terminal** at `/tui` for browser-based TUI access
-- Persistent state via **Railway Volume** (so config/credentials/memory survive redeploys)
+| Skill | What it does | When it runs |
+|-------|--------------|--------------|
+| `file-claim` | Files BCBS/GeoBlue insurance reimbursement claims via the BCBS REST API. Reads pending claims from Google Sheets, handles 2FA via Telegram, updates Sheets with claim refs. | On demand: "file claim" in Telegram |
+| `gps-boleto` | Generates monthly GPS (social-security) boletos for Fernanda and Max via the SAL portal. Uses Browserbase cloud browser for CAPTCHA solving. | Monthly cron (5th of month) or on demand: "GPS boleto" |
+| `esocial-dae` | Generates monthly eSocial DAE (domestic-worker tax) slips via gov.br. Uses Browserbase for human gov.br login. | Monthly cron or on demand: "eSocial DAE" |
+| Receipt processing | When Fernanda sends a bill image via Telegram: extracts data via vision, uploads to Drive, appends a row to the "Medical Bills" Google Sheet. | Automatic on image receipt (see `TOOLS.md`) |
+| Calendar invites | Creates Google Calendar events via the `gog` CLI. | On demand: "create an event…" |
 
-## How it works (high level)
+---
 
-- The container runs a wrapper web server.
-- The wrapper protects `/setup` with `SETUP_PASSWORD`.
-- During setup, the wrapper runs `openclaw onboard --non-interactive ...` inside the container, writes state to the volume, and then starts the gateway.
-- After setup, **`/` is OpenClaw**. The wrapper reverse-proxies all traffic (including WebSockets) to the local gateway process.
+## Architecture
 
-## Getting chat tokens (so you don't have to scramble)
-
-### Telegram bot token
-
-1. Open Telegram and message **@BotFather**
-2. Run `/newbot` and follow the prompts
-3. BotFather will give you a token that looks like: `123456789:AA...`
-4. Paste that token into `/setup`
-
-### Discord bot token
-
-1. Go to the Discord Developer Portal: https://discord.com/developers/applications
-2. **New Application** → pick a name
-3. Open the **Bot** tab → **Add Bot**
-4. Copy the **Bot Token** and paste it into `/setup`
-5. Invite the bot to your server (OAuth2 URL Generator → scopes: `bot`, `applications.commands`; then choose permissions)
-
-## Web Terminal (TUI)
-
-The template includes an optional web-based terminal that runs `openclaw tui` in your browser.
-
-### Enabling
-
-Set `ENABLE_WEB_TUI=true` in your Railway Variables. The terminal is **disabled by default**.
-
-Once enabled, access it at `/tui` or via the "Open Terminal" button on the setup page.
-
-### Security
-
-The web TUI implements multiple security layers:
-
-| Control | Description |
-|---------|-------------|
-| **Opt-in only** | Disabled by default, requires explicit `ENABLE_WEB_TUI=true` |
-| **Password protected** | Uses the same `SETUP_PASSWORD` as the setup wizard |
-| **Single session** | Only 1 concurrent TUI session allowed at a time |
-| **Idle timeout** | Auto-closes after 5 minutes of inactivity (configurable via `TUI_IDLE_TIMEOUT_MS`) |
-| **Max duration** | Hard limit of 30 minutes per session (configurable via `TUI_MAX_SESSION_MS`) |
-
-### Configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ENABLE_WEB_TUI` | `false` | Set to `true` to enable |
-| `TUI_IDLE_TIMEOUT_MS` | `300000` (5 min) | Closes session after inactivity |
-| `TUI_MAX_SESSION_MS` | `1800000` (30 min) | Maximum session duration |
-
-## Local testing
-
-```bash
-docker build -t openclaw-railway-template .
-
-docker run --rm -p 8080:8080 \
-  -e PORT=8080 \
-  -e SETUP_PASSWORD=test \
-  -e ENABLE_WEB_TUI=true \
-  -e OPENCLAW_STATE_DIR=/data/.openclaw \
-  -e OPENCLAW_WORKSPACE_DIR=/data/workspace \
-  -v $(pwd)/.tmpdata:/data \
-  openclaw-railway-template
-
-# Setup wizard: http://localhost:8080/setup (password: test)
-# Web terminal: http://localhost:8080/tui (after setup)
+```
+Telegram → OpenClaw Gateway (Railway) → Claude Sonnet 4.5 → Python skills
+                    │                                        │
+                    └──── Express wrapper (src/server.js) ───┘
+                                Setup wizard at /setup
+                                Web TUI at /tui
 ```
 
-## FAQ
+**Single Docker container on Railway, single persistent volume at `/data`.**
 
-**Q: How do I access the setup page?**
+- `src/server.js` — Express wrapper. Proxies traffic to internal OpenClaw gateway, injects auth tokens, manages gateway lifecycle.
+- `entrypoint.sh` — Container startup. Deploys skills + workspace docs to `/data/workspace`, launches Chromium for local browser tasks.
+- `Dockerfile` — Builds the image (installs OpenClaw via npm + Python deps + Playwright).
+- `skills/*/SKILL.md` — Skill definitions injected into FerdyBot's context. Each defines a trigger phrase and the command to run.
 
-A: Go to `/setup` on your deployed instance. When prompted for credentials, use the generated `SETUP_PASSWORD` from your Railway Variables as the password. The username field is ignored—you can leave it empty or enter anything.
+---
 
-**Q: I see "gateway disconnected" or authentication errors in the Control UI. What should I do?**
+## 📍 Where to make common edits
 
-A: Go back to `/setup` and click the "Open OpenClaw UI" button from there. The setup page passes the required auth token to the UI. Accessing the UI directly without the token will cause connection errors.
+### Change a skill's behavior (BCBS claim, GPS, eSocial)
 
-**Q: I don't see the TUI option on the setup page.**
+Each skill lives in `skills/<name>/`:
 
-A: Make sure `ENABLE_WEB_TUI=true` is set in your Railway Variables and redeploy. The web terminal is disabled by default.
-
-**Q: How do I approve pairing for Telegram or Discord?**
-
-A: Go to `/setup` and use the "Approve Pairing" dialog to approve pending pairing requests from your chat channels.
-
-**Q: I see "pairing required" when opening the Control UI. How do I fix it?**
-
-A: New browsers/devices need a one-time approval from the gateway. Go to `/setup`, click "Manage Devices" in the Devices section, and click "Approve Latest Request". Refresh the Control UI and it should connect. Local connections (127.0.0.1) are auto-approved; remote connections (LAN, public URL) require explicit approval.
-
-**Q: How do I change the AI model after setup?**
-
-A: Use the OpenClaw CLI to switch models. Access the web terminal at `/tui` (if enabled) or SSH into your container and run:
-
-```bash
-openclaw models set provider/model-id
+```
+skills/file-claim/
+  ├── SKILL.md              ← trigger phrases + what FerdyBot should do (loaded every call)
+  ├── claim_filer_api.py    ← the actual logic (BCBS REST API, 2FA, Sheets updates)
+  ├── MANUAL_FALLBACK.md    ← reference doc for when the API script fails (not auto-loaded)
+  └── _dev/                 ← debugging utilities, not part of runtime
 ```
 
-For example: `openclaw models set anthropic/claude-sonnet-4-20250514` or `openclaw models set openai/gpt-4-turbo`. Use `openclaw models list --all` to see available models.
+To change WHAT the script does, edit the `.py` file. To change WHEN FerdyBot triggers it or HOW it explains itself to FerdyBot, edit `SKILL.md`.
 
-**Q: How do I access configuration after the initial setup?**
+### Change the receipt-processing flow
 
-A: Visit `/setup` on your deployed instance at any time — it works both before and after setup. Once configured, the setup page shows your current status along with management tools: device approval, health checks (Run Doctor), data export, and a reset option. You'll need your `SETUP_PASSWORD` to access it.
+Edit `TOOLS.md` (the workflow steps + provider-to-Sheets mapping) or `receipt_sheet_template.py` (the Python snippet that appends a row to the Sheet).
 
-**Q: My config seems broken or I'm getting strange errors. How do I fix it?**
+### Change deployment config (model, sessions, compaction)
 
-A: Go to `/setup` and click the "Run Doctor" button. This runs `openclaw doctor --repair` which performs health checks on your gateway and channels, creates a backup of your config, and removes any unrecognized or corrupted configuration keys.
+Live config lives on the Railway volume at `/data/.openclaw/openclaw.json` — NOT in this repo. Edit via Railway SSH (see `docs/FERDY_README.md` → "How to Make Future Config Changes" for the safe two-step deploy pattern).
 
-## Screenshots
+### Change setup wizard / web TUI
 
-## Setup
+Edit files in `src/public/` (HTML/CSS/JS, no build step).
 
-<img width="2110" height="2032" alt="CleanShot 2026-02-23 at 21 57 59@2x" src="https://github.com/user-attachments/assets/28640eec-fa35-42f2-ba56-cb1fbb9525de" />
+---
 
-## TUI
+## Deployment
 
-<img width="2510" height="608" alt="CleanShot 2026-02-23 at 22 08 20@2x" src="https://github.com/user-attachments/assets/61147ec2-ddd5-4b5b-b9ac-0dd81a1ae4c7" />
+- **Platform:** Railway, project `vivacious-compassion`, service `OpenClaw`
+- **Auto-deploy:** push to `main` → Railway rebuilds Docker image + redeploys
 
-## Device approval
+```bash
+cd ~/openclaw-railway-template
+git push origin main
+# Then watch:
+railway logs
+```
 
-<img width="1712" height="1376" alt="CleanShot 2026-02-23 at 21 59 21@2x" src="https://github.com/user-attachments/assets/f30ab683-dbc2-4980-ace7-152265e00c79" />
+To open a shell in the live container:
+```bash
+railway ssh
+```
 
-## Support
+To force a fresh deploy (no code changes):
+```bash
+railway redeploy
+```
 
-Need help? [Request support on Railway Station](https://station.railway.com/all-templates/d0880c01-2cc5-462c-8b76-d84c1a203348)
+---
+
+## Environment variables (Railway → Variables)
+
+| Variable | Purpose |
+|----------|---------|
+| `SETUP_PASSWORD` | Protects the `/setup` wizard |
+| `OPENCLAW_STATE_DIR` | `/data/.openclaw` (config + credentials) |
+| `OPENCLAW_WORKSPACE_DIR` | `/data/workspace` (skills + memory) |
+| `OPENCLAW_GATEWAY_TOKEN` | Auto-generated if unset; auto-injected into proxied requests |
+| `BCBS_USERNAME` / `BCBS_PASSWORD` | BCBS portal login (used by `claim_filer_api.py`) |
+| `BROWSERBASE_API_KEY` | Cloud browser for gov.br + SAL skills |
+| `GOVBR_CPF` / `GOVBR_PASSWORD` | Pre-fill credentials for gov.br auth |
+| `GOG_KEYRING_PASSWORD` | Encrypts `gog` CLI's Google OAuth tokens on disk |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Notifications from Python scripts |
+
+---
+
+## Repo layout
+
+```
+openclaw-railway-template/
+├── CLAUDE.md                ← read this first if you're an AI agent working on this repo
+├── docs/
+│   ├── FERDY_README.md      ← deep operational reference (config history, incidents, lessons)
+│   ├── ADR-001-claim-filing-architecture.md
+│   └── browser-diagnosis.md
+├── skills/
+│   ├── file-claim/          ← BCBS claim filing
+│   ├── gps-boleto/          ← Monthly GPS boleto generation
+│   └── esocial-dae/         ← Monthly eSocial DAE generation
+├── src/
+│   ├── server.js            ← Express wrapper (proxy, gateway lifecycle, setup wizard)
+│   └── public/              ← Setup wizard frontend
+├── TOOLS.md                 ← Workspace-level notes injected into every call (gog CLI, receipt workflow)
+├── receipt_sheet_template.py ← Sheets append template (loaded on demand during receipt processing)
+├── Dockerfile               ← Production image
+├── Dockerfile.base          ← Pre-built base image (Chromium, Python deps) — rebuilt manually via GitHub Actions
+├── entrypoint.sh            ← Container startup (Xvfb, Chromium, skills deploy)
+└── railway.toml             ← Railway build/deploy config
+```
+
+---
+
+## Where to learn more
+
+- **AI agents:** Start with `CLAUDE.md` for project conventions + critical reminders.
+- **Operations / incidents / config history:** `docs/FERDY_README.md` is the source of truth for what's broken, what was fixed, and how to safely change Railway config.
+- **Claim-filing architecture decisions:** `docs/ADR-001-claim-filing-architecture.md`
+- **Browser automation gotchas:** `docs/browser-diagnosis.md`
+- **OpenClaw security model + upstream docs:** [docs.openclaw.ai/gateway/security](https://docs.openclaw.ai/gateway/security)
+
+---
+
+## ⚠️ Security note
+
+This template exposes the OpenClaw gateway to the public internet. If you only use Telegram (no need for the web dashboard), you can remove the public Railway endpoint after setup. See the [OpenClaw security docs](https://docs.openclaw.ai/gateway/security) for the full threat model.
+
+## License
+
+MIT (see `LICENSE`).

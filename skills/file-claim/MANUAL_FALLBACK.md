@@ -1,7 +1,7 @@
 # Manual Browser Automation Fallback — Flutter Web Patterns
 
 ⚠️ **DO NOT read this file unless Fernanda has explicitly told you to continue manually.**
-The Playwright script (`claim_filer.py`) is the primary method. This file exists only as a last resort.
+The API-based script (`claim_filer_api.py`) is the primary method — it calls BCBS REST endpoints directly without browser automation. This file exists only as a last resort if the API approach breaks (e.g. BCBS changes their API). The old Playwright-based `claim_filer.py` was removed; if you need browser automation as a fallback, you'll have to write a new one.
 
 ## Token Efficiency Rules (MANDATORY)
 
