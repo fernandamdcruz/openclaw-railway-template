@@ -1205,10 +1205,6 @@ proxy.on("proxyReq", (proxyReq, req, res) => {
 proxy.on("proxyReqWs", (proxyReq, req, socket, options, head) => {
   proxyReq.setHeader("Authorization", `Bearer ${OPENCLAW_GATEWAY_TOKEN}`);
   proxyReq.setHeader("Origin", PROXY_ORIGIN);
-  log.info(
-    "ws-proxy-debug",
-    `path=${req.url} tokenPrefix=${OPENCLAW_GATEWAY_TOKEN.slice(0, 8)} proxyReqAuthHeader=${proxyReq.getHeader?.("Authorization")?.slice(0, 30) || "MISSING"}`,
-  );
 });
 
 // Catch-all proxy to OpenClaw gateway. Protected with Basic auth (SETUP_PASSWORD)
@@ -1238,8 +1234,13 @@ app.use(requireSetupAuth, async (req, res) => {
     }
   }
 
-  if (req.path === "/openclaw" && !req.query.token) {
-    return res.redirect(`/openclaw?token=${OPENCLAW_GATEWAY_TOKEN}`);
+  // The OpenClaw Control UI SPA reads the gateway token from the URL HASH
+  // (`#token=...`), NOT from the query string. Using `?token=...` is silently
+  // dropped by the SPA. Hash fragments aren't sent to the server so we can't
+  // detect whether the user already has one — that's fine; the SPA stores the
+  // token in settings on first arrival and the redirect is idempotent.
+  if (req.path === "/openclaw") {
+    return res.redirect(`/openclaw#token=${OPENCLAW_GATEWAY_TOKEN}`);
   }
 
   return proxy.web(req, res, { target: GATEWAY_TARGET });
