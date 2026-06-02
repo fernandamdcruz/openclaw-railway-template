@@ -1248,7 +1248,9 @@ server.on("upgrade", async (req, socket, head) => {
   // Gateway WebSocket proxy auto-injects OPENCLAW_GATEWAY_TOKEN — require Basic
   // auth (SETUP_PASSWORD) so unauthenticated clients can't open a control
   // socket to FerdyBot. /tui/ws is handled above with its own verifyTuiAuth.
-  if (!verifyTuiAuth(req)) {
+  const authResult = verifyTuiAuth(req);
+  log.info("websocket-auth-debug", `path=${url.pathname} authHeader=${(req.headers.authorization || "").slice(0, 20)}... cookie=${(req.headers.cookie || "").slice(0, 80)} authResult=${authResult}`);
+  if (!authResult) {
     socket.write("HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"OpenClaw\"\r\n\r\n");
     socket.destroy();
     return;
