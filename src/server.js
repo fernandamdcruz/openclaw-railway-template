@@ -1205,6 +1205,10 @@ proxy.on("proxyReq", (proxyReq, req, res) => {
 proxy.on("proxyReqWs", (proxyReq, req, socket, options, head) => {
   proxyReq.setHeader("Authorization", `Bearer ${OPENCLAW_GATEWAY_TOKEN}`);
   proxyReq.setHeader("Origin", PROXY_ORIGIN);
+  log.info(
+    "ws-proxy-debug",
+    `path=${req.url} tokenPrefix=${OPENCLAW_GATEWAY_TOKEN.slice(0, 8)} proxyReqAuthHeader=${proxyReq.getHeader?.("Authorization")?.slice(0, 30) || "MISSING"}`,
+  );
 });
 
 // Catch-all proxy to OpenClaw gateway. Protected with Basic auth (SETUP_PASSWORD)
