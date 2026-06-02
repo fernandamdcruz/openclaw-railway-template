@@ -366,6 +366,10 @@ function requireSetupAuth(req, res, next) {
     res.set("WWW-Authenticate", 'Basic realm="OpenClaw Setup"');
     return res.status(401).send("Invalid password");
   }
+  // Issue a session cookie so subsequent same-origin requests (including
+  // browser WebSocket upgrades, which don't carry cached Basic auth) can
+  // authenticate without re-prompting the user.
+  setSessionCookie(res);
   return next();
 }
 
@@ -998,6 +1002,56 @@ function verifyTuiAuth(req) {
   return crypto.timingSafeEqual(passwordHash, expectedHash);
 }
 
+// Session cookie issued after successful Basic auth on HTTP. Browsers don't
+// reliably send Basic auth on WebSocket upgrades, so the cookie is the path
+// that lets the Control UI WebSocket authenticate. Value = HMAC of
+// SETUP_PASSWORD so it can't be guessed without knowing the password.
+const SESSION_COOKIE_NAME = "oc_session";
+
+function getSessionCookieValue() {
+  if (!SETUP_PASSWORD) return "";
+  return crypto
+    .createHmac("sha256", SETUP_PASSWORD)
+    .update("openclaw-session-v1")
+    .digest("hex");
+}
+
+function verifySessionCookie(req) {
+  if (!SETUP_PASSWORD) return false;
+  const cookieHeader = req.headers.cookie || "";
+  const found = cookieHeader
+    .split(";")
+    .map((c) => c.trim())
+    .find((c) => c.startsWith(`${SESSION_COOKIE_NAME}=`));
+  if (!found) return false;
+  const value = found.slice(SESSION_COOKIE_NAME.length + 1);
+  const expected = getSessionCookieValue();
+  if (!expected || value.length !== expected.length) return false;
+  try {
+    return crypto.timingSafeEqual(Buffer.from(value), Buffer.from(expected));
+  } catch {
+    return false;
+  }
+}
+
+function setSessionCookie(res) {
+  const value = getSessionCookieValue();
+  if (!value) return;
+  // SameSite=Strict and HttpOnly so it can't be exfiltrated via XSS or CSRF.
+  // Path=/ so it's sent on /openclaw, /tui, /api, etc.
+  res.setHeader(
+    "Set-Cookie",
+    `${SESSION_COOKIE_NAME}=${value}; HttpOnly; Secure; SameSite=Strict; Path=/`,
+  );
+}
+
+// Anything that needs "the user proved they know SETUP_PASSWORD" should use
+// this. Basic auth path keeps curl / API tooling working; cookie path keeps
+// browser WebSockets working.
+function verifyWrapperAuth(req) {
+  return verifyTuiAuth(req) || verifySessionCookie(req);
+}
+
 function createTuiWebSocketServer(httpServer) {
   const wss = new WebSocketServer({ noServer: true });
 
@@ -1245,12 +1299,11 @@ server.on("upgrade", async (req, socket, head) => {
     return;
   }
 
-  // Gateway WebSocket proxy auto-injects OPENCLAW_GATEWAY_TOKEN — require Basic
-  // auth (SETUP_PASSWORD) so unauthenticated clients can't open a control
+  // Gateway WebSocket proxy auto-injects OPENCLAW_GATEWAY_TOKEN — require auth
+  // (SETUP_PASSWORD via Basic auth header OR session cookie set by an earlier
+  // requireSetupAuth visit) so unauthenticated clients can't open a control
   // socket to FerdyBot. /tui/ws is handled above with its own verifyTuiAuth.
-  const authResult = verifyTuiAuth(req);
-  log.info("websocket-auth-debug", `path=${url.pathname} authHeader=${(req.headers.authorization || "").slice(0, 20)}... cookie=${(req.headers.cookie || "").slice(0, 80)} authResult=${authResult}`);
-  if (!authResult) {
+  if (!verifyWrapperAuth(req)) {
     socket.write("HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"OpenClaw\"\r\n\r\n");
     socket.destroy();
     return;
