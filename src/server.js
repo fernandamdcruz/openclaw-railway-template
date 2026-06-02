@@ -1153,7 +1153,11 @@ proxy.on("proxyReqWs", (proxyReq, req, socket, options, head) => {
   proxyReq.setHeader("Origin", PROXY_ORIGIN);
 });
 
-app.use(async (req, res) => {
+// Catch-all proxy to OpenClaw gateway. Protected with Basic auth (SETUP_PASSWORD)
+// because the proxy auto-injects OPENCLAW_GATEWAY_TOKEN into every upstream
+// request — without this guard, anyone on the internet could drive FerdyBot.
+// /healthz and /setup/* are matched by earlier route handlers and bypass this.
+app.use(requireSetupAuth, async (req, res) => {
   if (!isConfigured() && !req.path.startsWith("/setup")) {
     return res.redirect("/setup");
   }
@@ -1240,6 +1244,16 @@ server.on("upgrade", async (req, socket, head) => {
     socket.destroy();
     return;
   }
+
+  // Gateway WebSocket proxy auto-injects OPENCLAW_GATEWAY_TOKEN — require Basic
+  // auth (SETUP_PASSWORD) so unauthenticated clients can't open a control
+  // socket to FerdyBot. /tui/ws is handled above with its own verifyTuiAuth.
+  if (!verifyTuiAuth(req)) {
+    socket.write("HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"OpenClaw\"\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+
   try {
     await ensureGatewayRunning();
   } catch (err) {
