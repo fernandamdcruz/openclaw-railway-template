@@ -1235,12 +1235,14 @@ app.use(requireSetupAuth, async (req, res) => {
   }
 
   // The OpenClaw Control UI SPA reads the gateway token from the URL HASH
-  // (`#token=...`), NOT from the query string. Using `?token=...` is silently
-  // dropped by the SPA. Hash fragments aren't sent to the server so we can't
-  // detect whether the user already has one — that's fine; the SPA stores the
-  // token in settings on first arrival and the redirect is idempotent.
-  if (req.path === "/openclaw") {
-    return res.redirect(`/openclaw#token=${OPENCLAW_GATEWAY_TOKEN}`);
+  // (`#token=...`), NOT the query string (the SPA silently drops `?token=`).
+  // Hash fragments aren't sent to the server, so to avoid an infinite redirect
+  // loop we add a visible query marker (`?ui=1`) the server CAN see: redirect
+  // only when it's absent. After the redirect the browser requests
+  // `/openclaw?ui=1` (hash stripped) — we see ui=1, skip the redirect, and
+  // proxy the SPA, which then reads the token from the hash still in the URL.
+  if (req.path === "/openclaw" && req.query.ui !== "1") {
+    return res.redirect(`/openclaw?ui=1#token=${OPENCLAW_GATEWAY_TOKEN}`);
   }
 
   return proxy.web(req, res, { target: GATEWAY_TARGET });
