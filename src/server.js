@@ -682,6 +682,25 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
       );
       extra += `[config] gateway.controlUi.allowInsecureAuth=true exit=${allowInsecureResult.code}\n`;
 
+      // Behind this reverse proxy the gateway can never see the Control UI as a
+      // "local direct" client (the forwarded client IP is the real browser IP,
+      // not loopback), so allowInsecureAuth alone does NOT bypass device
+      // pairing — connections fail with "pairing required" (1008). Disabling
+      // device auth makes the gateway rely on the shared token, which we
+      // already gate behind the wrapper's SETUP_PASSWORD (Basic auth/cookie)
+      // and only hand to authenticated users via the #token redirect. Pairing
+      // would be a redundant third layer here.
+      const disableDeviceAuthResult = await runCmd(
+        OPENCLAW_NODE,
+        clawArgs([
+          "config",
+          "set",
+          "gateway.controlUi.dangerouslyDisableDeviceAuth",
+          "true",
+        ]),
+      );
+      extra += `[config] gateway.controlUi.dangerouslyDisableDeviceAuth=true exit=${disableDeviceAuthResult.code}\n`;
+
       const tokenResult = await runCmd(
         OPENCLAW_NODE,
         clawArgs([
