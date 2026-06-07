@@ -321,12 +321,18 @@ def generate_boleto_for_person(
 
     page.screenshot(path=f"/tmp/gps_{name.lower()}_03_captcha_done.png")
 
-    # Step 5: Click Consultar
+    # Step 5: Click Consultar (sometimes CAPTCHA auto-submits and skips this)
     print(f"[GPS] Clicking Consultar...")
     try:
-        consultar = page.get_by_text("Consultar", exact=True)
-        consultar.click(timeout=5000)
-        time.sleep(4)
+        # Check if we already advanced to the verification page (Confirmar / Nova Consulta)
+        # which happens when the CAPTCHA was auto-validated and form submitted on its own.
+        if page.get_by_text("Verifique os dados", exact=False).count() > 0 \
+           or page.get_by_text("Nova Consulta", exact=False).count() > 0:
+            print(f"[GPS] Already on verification page — skipping Consultar")
+        else:
+            consultar = page.get_by_text("Consultar", exact=True)
+            consultar.click(timeout=5000)
+            time.sleep(4)
     except Exception as e:
         print(f"[GPS] Consultar click error: {e}")
         page.screenshot(path=f"/tmp/gps_{name.lower()}_err_consultar.png")
@@ -424,6 +430,25 @@ def generate_boleto_for_person(
         return None
 
     page.screenshot(path=f"/tmp/gps_{name.lower()}_09_contribution_added.png")
+
+    # Step 10b: Set "Data do Pagamento" to a valid weekday — the field defaults
+    # to today, and SAL rejects weekend dates with "Data de pagamento não pode
+    # ser Sábado ou Domingo". We compute the canonical due date (15th of the
+    # month after competência, rolled forward off weekends).
+    payment_date = compute_payment_date(competencia)
+    print(f"[GPS] Setting Data do Pagamento to {payment_date}...")
+    try:
+        # The field is a native HTML5 date input. It sits in the "Dados do Pagamento"
+        # section, alongside the "Código Pagamento" dropdown. Target via input[type=date]
+        # which is unique on this page.
+        date_input = page.locator('input[type="date"]').first
+        date_input.fill(payment_date)
+        date_input.press("Tab")  # blur to commit the value
+        time.sleep(1)
+        print(f"[GPS] Data do Pagamento set: {payment_date}")
+    except Exception as e:
+        print(f"[GPS] Data do Pagamento set error (proceeding anyway): {e}")
+        page.screenshot(path=f"/tmp/gps_{name.lower()}_err_payment_date.png")
 
     # Step 11: Click page-level "Confirmar" (last of the visible Confirmar buttons)
     print(f"[GPS] Clicking page-level Confirmar...")
@@ -598,6 +623,40 @@ def get_competencia() -> str:
     first_of_month = today.replace(day=1)
     prev_month = first_of_month - timedelta(days=1)
     return prev_month.strftime("%m/%Y")
+
+
+def compute_payment_date(competencia_mmYYYY: str) -> str:
+    """Compute a valid Data do Pagamento for the GPS boleto.
+
+    For code 1163 (INSS contribuinte individual) the due date is the 15th
+    of the month following competência. If the 15th is a weekend, push to
+    the next Monday. If today is already past that date, use tomorrow
+    (rolled forward to the next weekday). The SAL portal rejects weekend
+    payment dates ("Data de pagamento não pode ser Sábado ou Domingo").
+
+    Returns YYYY-MM-DD (the format HTML5 date inputs accept via .fill()).
+    """
+    mm, yyyy = competencia_mmYYYY.split("/")
+    month = int(mm)
+    year = int(yyyy)
+    if month == 12:
+        due_month, due_year = 1, year + 1
+    else:
+        due_month, due_year = month + 1, year
+
+    from datetime import date as _date
+    due = _date(due_year, due_month, 15)
+    today = _date.today()
+
+    # If the canonical due date is already in the past, use tomorrow.
+    if due < today:
+        due = today + timedelta(days=1)
+
+    # Roll forward off weekends (Mon=0..Sun=6).
+    while due.weekday() >= 5:
+        due += timedelta(days=1)
+
+    return due.strftime("%Y-%m-%d")
 
 
 def main():

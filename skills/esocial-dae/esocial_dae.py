@@ -395,32 +395,88 @@ def generate_dae(page: Page, competencia: str, live_view_url: str) -> Optional[d
 
     page.screenshot(path="/tmp/esocial_05_month_selected.png")
 
-    # Step 7: Click "Emitir Guia" button
-    print("[DAE] Clicking 'Emitir Guia'...")
+    # Step 7: Ensure the folha is "Encerrada" (closed) — otherwise Emitir Guia
+    # is not yet available. On the ListarPagamentos page, if the folha is
+    # "Pendente", a green "Encerrar Folha" button appears top-right.
+    # Encerrar Folha is a permanent financial commitment, so we do NOT
+    # auto-click it. We ask Fernanda to click it via live view and poll.
+    print("[DAE] Checking folha state (Pendente vs Encerrada)...")
+    listing_text = page.evaluate("document.body.innerText") or ""
+    folha_is_pendente = (
+        "Encerrar Folha" in listing_text
+        or "Situação da folha: Pendente" in listing_text
+        or "Situação da folha:\nPendente" in listing_text
+    )
+
+    if folha_is_pendente:
+        print("[DAE] Folha is PENDENTE — needs to be closed first")
+        send_telegram(
+            f"⚠️ A folha do eSocial ({competencia}) está PENDENTE. "
+            f"Por favor, abra o live view e clique no botão verde "
+            f"'Encerrar Folha' (topo direito), depois confirme. "
+            f"Aguardando até 5 minutos...\n\n{live_view_url}"
+        )
+        # Poll until the URL changes to FechamentoFolha OR
+        # the success text appears (handles both manual click and slow nav).
+        deadline = time.time() + 300  # 5 minutes
+        while time.time() < deadline:
+            if "FechamentoFolha" in page.url:
+                print(f"[DAE] Detected navigation to {page.url}")
+                break
+            try:
+                txt = page.evaluate("document.body.innerText") or ""
+                if "encerrada com sucesso" in txt.lower():
+                    print("[DAE] Detected 'encerrada com sucesso'")
+                    break
+            except Exception:
+                pass
+            time.sleep(3)
+        else:
+            print("[DAE] Timed out waiting for folha to be closed")
+            send_telegram("Timeout esperando encerramento da folha (5 min).")
+            page.screenshot(path="/tmp/esocial_err_encerrar_timeout.png")
+            return None
+        # Give the page a moment to fully render after the navigation.
+        time.sleep(2)
+    else:
+        print("[DAE] Folha appears Encerrada — proceeding")
+
+    # Step 8: Navigate to FechamentoFolha if not already there. This is the
+    # page that exposes the "Emitir Guia" download link for a closed folha.
+    if "FechamentoFolha" not in page.url:
+        fechamento_url = f"https://www.esocial.gov.br/portal/FolhaPagamento/FechamentoFolha?competencia={comp_yyyymm}"
+        print(f"[DAE] Navigating to {fechamento_url}")
+        try:
+            page.goto(fechamento_url, wait_until="domcontentloaded", timeout=30000)
+            time.sleep(3)
+        except Exception as e:
+            print(f"[DAE] FechamentoFolha nav error: {e}")
+            page.screenshot(path="/tmp/esocial_err_fechamento_nav.png")
+            return None
+
+    page.screenshot(path="/tmp/esocial_06_fechamento.png")
+
+    # Step 9: Click "Emitir Guia" — this triggers a PDF download event,
+    # not a navigation. We use expect_download to capture the file.
+    pdf_path = f"/tmp/esocial_dae_{comp_yyyymm}.pdf"
+    print(f"[DAE] Clicking 'Emitir Guia' to download PDF...")
     try:
-        emitir = page.get_by_text("Emitir Guia", exact=True)
-        emitir.click(timeout=5000)
-        time.sleep(5)
-        print(f"[DAE] Emitir Guia clicked — PDF should be loading")
+        with page.expect_download(timeout=30000) as dl_info:
+            page.get_by_text("Emitir Guia", exact=False).first.click()
+        download = dl_info.value
+        download.save_as(pdf_path)
+        print(f"[DAE] PDF saved: {pdf_path}")
     except Exception as e:
-        print(f"[DAE] Emitir Guia error: {e}")
+        print(f"[DAE] Emitir Guia / download error: {e}")
         page.screenshot(path="/tmp/esocial_err_emitir.png")
-        # Try the direct URL as fallback
-        print(f"[DAE] Trying direct URL: {ESOCIAL_EMIT_URL}?competencia={comp_yyyymm}")
-        page.goto(f"{ESOCIAL_EMIT_URL}?competencia={comp_yyyymm}", wait_until="domcontentloaded", timeout=30000)
-        time.sleep(5)
+        send_telegram(
+            f"❌ Falha ao baixar a DAE: {e}. "
+            f"Verifique os screenshots em /tmp/esocial_*.png"
+        )
+        return None
 
-    page.screenshot(path="/tmp/esocial_06_dae_pdf.png")
-    print(f"[DAE] DAE page URL: {page.url}")
-
-    # Step 8: Download the DAE PDF and extract info
-    # The DAE is rendered as a PDF in Chrome's built-in viewer.
-    # Chrome's PDF viewer doesn't expose text to Playwright.
-    # We download the PDF via HTTP using the browser's session cookies,
-    # then parse it with PyMuPDF to extract the linha digitável.
-    print("[DAE] Downloading DAE PDF via HTTP...")
-    result = download_and_parse_dae_pdf(page, comp_yyyymm)
-
+    # Step 10: Parse the downloaded PDF
+    result = extract_dae_from_pdf(pdf_path)
     if result:
         print(f"[DAE] DAE extracted: {result}")
         page.screenshot(path="/tmp/esocial_07_done.png")
@@ -433,69 +489,6 @@ def generate_dae(page: Page, competencia: str, live_view_url: str) -> Optional[d
         )
 
     return result
-
-
-def download_and_parse_dae_pdf(page: Page, comp_yyyymm: str) -> Optional[dict]:
-    """
-    Download the DAE PDF using the browser's cookies and parse it with PyMuPDF.
-    The PDF URL is: EmitirGuiaMensal?competencia=YYYYMM
-    """
-    # Get cookies from the browser via CDP
-    try:
-        client = page.context.new_cdp_session(page)
-        result = client.send("Network.getCookies", {"urls": ["https://www.esocial.gov.br"]})
-        cookies = result.get("cookies", [])
-        cookie_header = "; ".join(f'{c["name"]}={c["value"]}' for c in cookies)
-        print(f"[DAE] Got {len(cookies)} cookies from browser")
-    except Exception as e:
-        print(f"[DAE] Could not get cookies via CDP: {e}")
-        # Fallback: get cookies from Playwright context
-        try:
-            cookies = page.context.cookies()
-            cookie_header = "; ".join(
-                f'{c["name"]}={c["value"]}' for c in cookies
-                if "esocial" in c.get("domain", "")
-            )
-            print(f"[DAE] Got cookies via Playwright context")
-        except Exception as e2:
-            print(f"[DAE] Could not get cookies at all: {e2}")
-            return None
-
-    # Download the PDF
-    pdf_url = f"{ESOCIAL_EMIT_URL}?competencia={comp_yyyymm}"
-    print(f"[DAE] Downloading: {pdf_url}")
-    try:
-        resp = requests.get(
-            pdf_url,
-            headers={
-                "Cookie": cookie_header,
-                "Accept": "application/pdf",
-            },
-            timeout=30,
-        )
-        ct = resp.headers.get("content-type", "")
-        print(f"[DAE] Response: {resp.status_code}, Content-Type: {ct}, Size: {len(resp.content)}")
-
-        if resp.status_code != 200:
-            print(f"[DAE] HTTP error downloading PDF")
-            return None
-
-        if not ("pdf" in ct.lower() or resp.content[:4] == b"%PDF"):
-            print(f"[DAE] Response is not a PDF: {resp.content[:200]}")
-            return None
-
-    except Exception as e:
-        print(f"[DAE] PDF download error: {e}")
-        return None
-
-    # Save PDF locally
-    pdf_path = f"/tmp/esocial_dae_{comp_yyyymm}.pdf"
-    with open(pdf_path, "wb") as f:
-        f.write(resp.content)
-    print(f"[DAE] PDF saved: {pdf_path} ({len(resp.content)} bytes)")
-
-    # Parse with PyMuPDF
-    return extract_dae_from_pdf(pdf_path)
 
 
 def extract_dae_from_pdf(pdf_path: str) -> Optional[dict]:
