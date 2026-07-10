@@ -321,37 +321,74 @@ def generate_boleto_for_person(
 
     page.screenshot(path=f"/tmp/gps_{name.lower()}_03_captcha_done.png")
 
-    # Step 5: Click Consultar (sometimes CAPTCHA auto-submits and skips this)
-    print(f"[GPS] Clicking Consultar...")
-    try:
-        # Check if we already advanced to the verification page (Confirmar / Nova Consulta)
-        # which happens when the CAPTCHA was auto-validated and form submitted on its own.
-        if page.get_by_text("Verifique os dados", exact=False).count() > 0 \
-           or page.get_by_text("Nova Consulta", exact=False).count() > 0:
-            print(f"[GPS] Already on verification page — skipping Consultar")
-        else:
-            consultar = page.get_by_text("Consultar", exact=True)
-            consultar.click(timeout=5000)
-            time.sleep(4)
-    except Exception as e:
-        print(f"[GPS] Consultar click error: {e}")
-        page.screenshot(path=f"/tmp/gps_{name.lower()}_err_consultar.png")
-        return None
+    # Steps 5-6 (merged): Advance from CAPTCHA to the contributions page.
+    # After the CAPTCHA is solved the form may land in any of three states:
+    #   (a) Still on the portal — Consultar visible, needs click
+    #   (b) On the verification page — "Verifique os dados" + Confirmar
+    #   (c) Straight to the contributions page — "Adicionar" button visible
+    # We also have to survive the <app-loading><br-scrim show> overlay that
+    # briefly blocks clicks after each transition.
+
+    def _wait_scrim_hidden(timeout=10000):
+        try:
+            page.locator("br-scrim[show]").first.wait_for(state="hidden", timeout=timeout)
+        except Exception:
+            pass
+
+    def _on_contributions_page():
+        return (
+            page.locator('br-button[title="Adicionar"]').count() > 0
+            or page.get_by_text("Nenhuma contribuição informada", exact=False).count() > 0
+            or page.locator('br-select[label="Código Pagamento"]').count() > 0
+        )
+
+    def _on_verification_page():
+        return (
+            page.get_by_text("Verifique os dados", exact=False).count() > 0
+            or page.get_by_text("Nova Consulta", exact=False).count() > 0
+        )
+
+    _wait_scrim_hidden()
+
+    # Step 5: Consultar if we're still on the portal
+    if _on_contributions_page():
+        print(f"[GPS] Already on contributions page — skipping Consultar + verify")
+    elif _on_verification_page():
+        print(f"[GPS] On verification page — skipping Consultar")
+    else:
+        print(f"[GPS] Clicking Consultar...")
+        try:
+            page.get_by_text("Consultar", exact=True).click(timeout=10000)
+        except Exception as e:
+            # The click may have succeeded despite the exception (e.g. Angular
+            # detached the element after handling it). Poll page state before
+            # giving up.
+            print(f"[GPS] Consultar click threw {e.__class__.__name__} — checking page state")
+        time.sleep(3)
+        _wait_scrim_hidden()
+        if not _on_contributions_page() and not _on_verification_page():
+            print(f"[GPS] Not on expected page after Consultar")
+            page.screenshot(path=f"/tmp/gps_{name.lower()}_err_consultar.png")
+            return None
 
     page.screenshot(path=f"/tmp/gps_{name.lower()}_04_after_consultar.png")
 
-    # Step 6: Verification page — click first "Confirmar" (br-button)
-    # Shows contributor details (name, NIT, category) + Confirmar / Nova Consulta
-    print(f"[GPS] Clicking Confirmar on verification page...")
-    try:
-        page.get_by_text("Confirmar", exact=True).first.click(timeout=5000)
-        time.sleep(4)
-        page.screenshot(path=f"/tmp/gps_{name.lower()}_05_after_verify.png")
+    # Step 6: Confirmar on verification page (if that's where we ended up)
+    if _on_verification_page() and not _on_contributions_page():
+        print(f"[GPS] Clicking Confirmar on verification page...")
+        try:
+            page.get_by_text("Confirmar", exact=True).first.click(timeout=10000)
+        except Exception as e:
+            print(f"[GPS] Verification Confirmar click threw {e.__class__.__name__} — checking page state")
+        time.sleep(3)
+        _wait_scrim_hidden()
+        if not _on_contributions_page():
+            print(f"[GPS] Not on contributions page after verification Confirmar")
+            page.screenshot(path=f"/tmp/gps_{name.lower()}_err_verify.png")
+            return None
         print(f"[GPS] Verification confirmed — on contributions page")
-    except Exception as e:
-        print(f"[GPS] Verification Confirmar error: {e}")
-        page.screenshot(path=f"/tmp/gps_{name.lower()}_err_verify.png")
-        return None
+
+    page.screenshot(path=f"/tmp/gps_{name.lower()}_05_after_verify.png")
 
     # Step 7: Select payment code 1163 from <br-select> dropdown
     print(f"[GPS] Selecting payment code {PAYMENT_CODE}...")
@@ -450,16 +487,24 @@ def generate_boleto_for_person(
         print(f"[GPS] Data do Pagamento set error (proceeding anyway): {e}")
         page.screenshot(path=f"/tmp/gps_{name.lower()}_err_payment_date.png")
 
-    # Step 11: Click page-level "Confirmar" (last of the visible Confirmar buttons)
+    # Step 11: Click page-level "Confirmar" (last of the visible Confirmar buttons).
+    # Wait for any lingering app-loading scrim to clear first (it can appear
+    # after the modal Confirmar, or after the Data do Pagamento field commits).
     print(f"[GPS] Clicking page-level Confirmar...")
+    _wait_scrim_hidden(timeout=10000)
     try:
-        page.get_by_text("Confirmar", exact=True).last.click(timeout=5000)
-        time.sleep(4)
-        print(f"[GPS] Page confirmed — on checkbox/selection page")
+        page.get_by_text("Confirmar", exact=True).last.click(timeout=10000)
     except Exception as e:
-        print(f"[GPS] Page confirm error: {e}")
+        # Angular may detach the button after the click succeeds. Poll for the
+        # next-page marker (a checkbox row) before treating this as an error.
+        print(f"[GPS] Page confirm click threw {e.__class__.__name__} — checking page state")
+    time.sleep(3)
+    _wait_scrim_hidden(timeout=10000)
+    if page.locator('input[type="checkbox"]').count() == 0:
+        print(f"[GPS] Page confirm did not advance to checkbox page")
         page.screenshot(path=f"/tmp/gps_{name.lower()}_err_page_confirm.png")
         return None
+    print(f"[GPS] Page confirmed — on checkbox/selection page")
 
     page.screenshot(path=f"/tmp/gps_{name.lower()}_10_selection_page.png")
 
