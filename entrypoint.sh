@@ -103,10 +103,22 @@ if [ ! -d /data/.linuxbrew ]; then
  echo "[entrypoint] receipt_sheet_template.py deployed to /data/workspace/"
  fi
 
- # Self-healing: ensure gog is installed (survives volume wipes)
+ # Self-healing: ensure gog is installed (brew lives on /data, so a volume
+ # wipe can lose it even though the image ships it).
+ #
+ # This runs SYNCHRONOUSLY on purpose. It used to be backgrounded with `&`,
+ # which let the server accept traffic while gog was still installing — any
+ # claim filed in that window failed with a confusing "gog: not found".
+ # Normally gog is present and this whole block is skipped, so the startup
+ # cost is zero; we only pay it in the already-broken case, where booting
+ # ~60s late with a working gog beats booting instantly with a broken one.
  if ! command -v gog >/dev/null 2>&1; then
- echo "[entrypoint] gog not found, installing in background..."
- (timeout 120 gosu openclaw brew install gogcli 2>&1 && echo "[entrypoint] gogcli installed OK" || echo "[entrypoint] WARNING: gogcli install failed") &
+ echo "[entrypoint] gog not found — installing now (blocking, max 120s)..."
+ if timeout 120 gosu openclaw brew install gogcli 2>&1; then
+ echo "[entrypoint] gogcli installed OK"
+ else
+ echo "[entrypoint] WARNING: gogcli install failed — Sheets/Gmail/Drive features will not work"
+ fi
  fi
 
  echo "[entrypoint] Starting server..."

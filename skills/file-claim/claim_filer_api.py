@@ -22,7 +22,7 @@ Usage (from FerdyBot skill):
 
 Environment variables:
   GOOGLE_SHEET_ID       — Google Sheet with claims data
-  GOOGLE_SHEET_TAB      — Tab name (default: "Medical Bills")
+  GOOGLE_SHEET_TAB      — Tab name (default: current year, e.g. "2026")
   TELEGRAM_BOT_TOKEN    — For sending result notifications
   TELEGRAM_CHAT_ID      — Chat to notify
 """
@@ -213,7 +213,9 @@ SERVICE_KEYWORD_FALLBACK = {
 
 # Google Sheets config — hardcoded defaults so it works without env vars
 GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "1wU7iuAH7mZdenIKNAyrUFuJkVjZsYjxeL07NzqUwMYk")
-GOOGLE_SHEET_TAB = os.environ.get("GOOGLE_SHEET_TAB", "2026")
+# Tab is named after the year (one tab per year). Derive it so this keeps
+# working after Jan 1 without a code change; override with GOOGLE_SHEET_TAB.
+GOOGLE_SHEET_TAB = os.environ.get("GOOGLE_SHEET_TAB", str(datetime.now().year))
 
 # gog CLI environment — hardcode ALL required vars
 GOG_ENV = os.environ.copy()

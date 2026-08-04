@@ -8,9 +8,10 @@ import os
 import json
 import sys
 import asyncio
+from datetime import datetime
 
 SHEET_ID = "1wU7iuAH7mZdenIKNAyrUFuJkVjZsYjxeL07NzqUwMYk"
-TAB = "2026"
+TAB = os.environ.get("GOOGLE_SHEET_TAB", str(datetime.now().year))
 BCBS_URL = "https://members.bcbsglobalsolutions.com"
 CDP_URL = "http://127.0.0.1:9222"
 

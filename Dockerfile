@@ -27,7 +27,8 @@ RUN apt-get update \
      PLAYWRIGHT_BROWSERS_PATH=/home/openclaw/.cache/ms-playwright \
      python3 -m playwright install --with-deps chromium
 
- RUN npm install -g openclaw@2026.3.13 clawhub@latest
+ # Both pinned — an unpinned @latest lets any rebuild pull a breaking version
+ RUN npm install -g openclaw@2026.3.13 clawhub@0.23.3
 
  WORKDIR /app
 
