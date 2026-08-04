@@ -1,6 +1,5 @@
 exec: python3 << 'SHEETEOF'
-import sys, os, json
-sys.path.insert(0, os.path.expanduser('~/.local/lib/python3.11/site-packages'))
+import os, json
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from datetime import datetime, timezone

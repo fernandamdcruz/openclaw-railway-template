@@ -16,8 +16,10 @@ RUN apt-get update \
  xvfb \
  && rm -rf /var/lib/apt/lists/*
 
- # Install Python Playwright for claim_filer.py
- RUN pip install --break-system-packages playwright requests PyMuPDF
+ # Install Python deps: Playwright (claim_filer), Google API (receipt_sheet_template)
+ RUN pip install --break-system-packages \
+     playwright requests PyMuPDF \
+     google-api-python-client google-auth
 
  # Install Python Playwright's Chromium browser to the shared cache directory
  # (Node.js Playwright below installs separately to the same dir, side-by-side)
