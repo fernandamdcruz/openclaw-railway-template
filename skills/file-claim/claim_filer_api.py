@@ -48,7 +48,7 @@ except ImportError:
 # CONFIGURATION
 # ============================================================================
 
-SCRIPT_VERSION = "api-v9-hardcode-all-defaults-2026-03-27"
+SCRIPT_VERSION = "api-v10-verify-dates-diagnosis-2026-10-02"
 print(f"[INIT] BCBS API Claim Filer {SCRIPT_VERSION} initialized at {datetime.now().isoformat()}")
 
 API_BASE = "https://claimsapire.hthworldwide.com/v4"
@@ -178,6 +178,8 @@ DIAGNOSIS_KEYWORD_FALLBACK = {
     "anxiety": ("F418", "ANXIETY DISORDER"),
     "routine": ("Z0000", "ROUTINE MEDICAL EXAM HEALTH FACIL"),
     "checkup": ("Z0000", "ROUTINE MEDICAL EXAM HEALTH FACIL"),
+    "check-up": ("Z0000", "ROUTINE MEDICAL EXAM HEALTH FACIL"),
+    "preventive": ("Z0000", "ROUTINE MEDICAL EXAM HEALTH FACIL"),
     "physical": ("Z0000", "ROUTINE MEDICAL EXAM HEALTH FACIL"),
     "wellness": ("Z0000", "ROUTINE MEDICAL EXAM HEALTH FACIL"),
     "ankle": ("S99919A", "UNSPECIFIED INJURY OF UNSPECIFIED ANKLE, INITIAL ENCOUNTER"),
@@ -782,19 +784,47 @@ def resolve_currency(currency_str: str, country_id: int = None) -> int:
     return 220
 
 
+# Things written into column G when a bill had no diagnosis. They are not
+# diagnoses: filing them produced "OTHER" on the form and BCBS rejected the claim.
+_PLACEHOLDER_DIAGNOSES = {"", "not specified on bill", "not specified", "n/a", "na",
+                          "none", "unknown", "-"}
+
+# Leading ICD-10 / CID code of column G: "Z01.4 - ...", "G473", "CID Z 01.0 ...".
+# Anchored at the start because column G puts the code first; unanchored, a
+# reason like "Vitamin B12 deficiency" would be read as CID B12.
+_ICD10_RE = re.compile(
+    r'^\s*(?:CID[\s:]*)?([A-Z])\s?(\d{2})(?:\s?\.\s?([0-9A-Z]{1,4})|([0-9A-Z]{1,4}))?\b')
+
+
+def extract_icd10(text: str) -> Optional[str]:
+    """Return column G's leading ICD-10 code in API form (no dot): 'Z01.4 - x' → 'Z014'."""
+    m = _ICD10_RE.match(text or "")
+    return (m.group(1) + m.group(2) + (m.group(3) or m.group(4) or "")) if m else None
+
+
+def _norm_icd(code: str) -> str:
+    return re.sub(r'[.\s-]', '', code or "").upper()
+
+
 def resolve_diagnosis(diagnosis_text: str, sequence: str = "03") -> Tuple[str, str]:
     """
-    Resolve free-text diagnosis to (ICD10Code, Description) accepted by the API.
+    Resolve column G to (ICD10Code, Description) accepted by the API.
+
+    Column G is "code - description" (e.g. "Z01.4 - Routine gynecological
+    examination"), or a plain-words reason when no document carries a CID.
 
     Strategy:
-    1. Fetch available diagnoses from API (patient-specific + generic)
-    2. Try exact ICD-10 code match (e.g. "L70.0" → L700)
-    3. Try fuzzy text match against available descriptions
-    4. Fall back to keyword map
-    5. Default to OTHER
+    1. Placeholder ("Not specified on bill", blank) → OTHER, which the caller
+       refuses to file.
+    2. A CID is present → use BCBS's own entry if the code is in the member's
+       list, otherwise send the CID itself. Never OTHER when we have a CID.
+    3. Plain-words reason → fuzzy match against BCBS's list, then whole-word
+       keyword map.
+    4. Nothing matched → OTHER (caller refuses to file).
     """
-    text = diagnosis_text.strip()
-    if not text:
+    text = (diagnosis_text or "").strip()
+    if text.lower() in _PLACEHOLDER_DIAGNOSES:
+        print(f"[DIAG] Column G has no diagnosis ({text!r})")
         return ("ECLAIM", "OTHER")
 
     print(f"[DIAG] Resolving diagnosis: '{text}'")
@@ -802,17 +832,25 @@ def resolve_diagnosis(diagnosis_text: str, sequence: str = "03") -> Tuple[str, s
     # Fetch available options from API
     options = fetch_diagnosis_options(sequence)
 
-    if options:
-        # ── Try 1: Exact ICD-10 code match ──
-        # Strip dots/spaces from input: "L70.0" → "L700", "R21" → "R21"
-        input_code = re.sub(r'[.\s-]', '', text).upper()
+    code = extract_icd10(text)
+    if code:
         for opt in options:
-            opt_code = re.sub(r'[.\s-]', '', opt["Icd10"]).upper()
-            if input_code == opt_code:
+            if _norm_icd(opt["Icd10"]) == code:
                 print(f"[DIAG] Exact ICD-10 match: {opt['Icd10']} = {opt['Description']}")
                 return (opt["Icd10"], opt["Description"])
 
-        # ── Try 2: Fuzzy match against both code AND description ──
+        # BCBS's picker only lists the member's past diagnoses plus a short
+        # generic list, so a new CID is usually missing from it. Send the real
+        # CID rather than OTHER; verify_saved_charge() confirms it stuck before
+        # the claim is submitted.
+        desc = _ICD10_RE.sub("", text, count=1).strip(" -–—:,;").strip()
+        if not re.search(r'[A-Za-zÀ-ÿ]{3,}', desc):  # e.g. a bare list of more codes
+            desc = code
+        print(f"[DIAG] CID {code} not in member's BCBS list — sending it directly: {desc}")
+        return (code, desc.upper())
+
+    if options:
+        # ── Fuzzy match against both code AND description ──
         best_score = 0
         best_match = None
         for opt in options:
@@ -829,17 +867,14 @@ def resolve_diagnosis(diagnosis_text: str, sequence: str = "03") -> Tuple[str, s
             print(f"[DIAG] Fuzzy match (score={best_score}): {best_match['Icd10']} = {best_match['Description']}")
             return (best_match["Icd10"], best_match["Description"])
 
-    # ── Try 3: Keyword fallback ──
+    # ── Keyword fallback ──
+    # Whole words only. Substring matching filed "routine ..." as URINARY TRACT
+    # INFECTION ("uti" is inside "routine") and "incidental" as DENTAL CARIES.
     key = text.lower()
     for keyword, (icd, desc) in DIAGNOSIS_KEYWORD_FALLBACK.items():
-        if keyword in key:
+        if re.search(rf'\b{re.escape(keyword)}\b', key):
             print(f"[DIAG] Keyword fallback '{keyword}': {icd} = {desc}")
             return (icd, desc)
-
-    # ── Try 4: If input looks like an ICD-10 code, use OTHER with a note ──
-    if re.match(r'^[A-Z]\d', text.upper()):
-        print(f"[DIAG] Input looks like ICD-10 code '{text}' but no match found, using OTHER")
-        return ("ECLAIM", "OTHER")
 
     print(f"[DIAG] No match for '{text}', using OTHER")
     return ("ECLAIM", "OTHER")
@@ -892,26 +927,36 @@ def resolve_service(diagnosis_text: str, procedure_codes: str = "",
 
 
 def format_date_api(date_str: str) -> str:
-    """Convert various date formats to YYYYMMDD for the API."""
-    # Try common formats
-    for fmt in ["%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%d-%b-%y", "%d-%b-%Y",
-                "%Y%m%d", "%m-%d-%Y", "%d.%m.%Y"]:
+    """
+    Column D (YYYY-MM-DD) → YYYYMMDD, the format the API accepts on write.
+
+    Strict on purpose. This used to try %m/%d/%Y before %d/%m/%Y, so a
+    Brazilian 05/08/2026 was silently filed as May 8. A refused claim is
+    recoverable; a wrong service date is not.
+    """
+    s = (date_str or "").strip()
+    for fmt in ("%Y-%m-%d", "%Y%m%d"):
         try:
-            dt = datetime.strptime(date_str.strip(), fmt)
-            return dt.strftime("%Y%m%d")
+            return datetime.strptime(s, fmt).strftime("%Y%m%d")
         except ValueError:
             continue
+    raise ValueError(f"Date of Service (column D) must be YYYY-MM-DD, got {date_str!r}")
 
-    # Last resort: try to extract numbers
-    nums = re.findall(r'\d+', date_str)
-    if len(nums) >= 3:
-        # Assume YYYY-MM-DD or similar
-        if len(nums[0]) == 4:
-            return f"{nums[0]}{nums[1]:0>2}{nums[2]:0>2}"
-        elif len(nums[2]) == 4:
-            return f"{nums[2]}{nums[0]:0>2}{nums[1]:0>2}"
 
-    raise ValueError(f"Cannot parse date: {date_str}")
+def parse_api_date(value: Any) -> Optional[str]:
+    """
+    Parse a date as the claims API returns it, to YYYYMMDD.
+
+    The API WRITES YYYYMMDD but READS BACK DD-MON-YY (e.g. "27-AUG-26"); the
+    portal converts back before re-sending (see its pR()/dKl() helpers).
+    """
+    s = str(value or "").strip().split("T")[0].split(" ")[0]
+    for fmt in ("%d-%b-%y", "%d-%b-%Y", "%Y%m%d", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%Y%m%d")
+        except ValueError:
+            continue
+    return None
 
 
 # ============================================================================
@@ -1001,12 +1046,14 @@ def download_from_drive(drive_link: str, output_path: str) -> bool:
     return False
 
 
-def upload_document(claim_id: int, charge_id: int, file_path: str) -> Optional[dict]:
+def upload_document(claim_id: int, charge_id: int, file_path: str, charge: dict) -> Optional[dict]:
     """
     Upload a supporting document to the claim.
     1. POST /chargedocuments/Initiate → get presigned S3 URL
     2. PUT to S3 → upload file
     3. POST /chargedocuments/Complete → confirm
+
+    `charge` is the Charge body exactly as sent to charges/save (write format).
     """
     filename = os.path.basename(file_path)
     extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else "pdf"
@@ -1064,13 +1111,16 @@ def upload_document(claim_id: int, charge_id: int, file_path: str) -> Optional[d
     etag = s3_resp.headers.get("ETag", "")
     print(f"[DOC] S3 upload success, ETag: {etag}")
 
-    # Step 3: Confirm upload
+    # Step 3: Confirm upload.
+    # Complete RE-SAVES the charge from the Charge in this body, so it must be
+    # in the API's write format. It used to be the charges/forclaim GET echo,
+    # which reads dates back as DD-MON-YY ("27-AUG-26"); posting that back
+    # wiped the service dates, leaving "Dates of Service" blank on every
+    # eClaim. Send what we saved in charges/save instead — the portal does the
+    # same (it converts dates back to YYYYMMDD before calling Complete).
     complete_body = {
         "Claim": make_claim_object(claim_id),
-        "Charge": {
-            "Documents": [],
-            "ChargeID": charge_id,
-        },
+        "Charge": {**charge, "ChargeID": charge_id, "Documents": []},
         "ChargeDocument": {
             "Name": filename,
             "FileExtension": extension,
@@ -1079,21 +1129,93 @@ def upload_document(claim_id: int, charge_id: int, file_path: str) -> Optional[d
         }
     }
 
-    # We need the full charge data for the Complete call
-    # Fetch it from charges/forclaim
-    charges = api_get(f"/charges/forclaim/{claim_id}/")
-    if charges and isinstance(charges, list):
-        for c in charges:
-            if c.get("ChargeID") == charge_id:
-                complete_body["Charge"] = c
-                complete_body["Charge"]["Documents"] = []  # Reset docs for this call
-                break
-
     complete_resp = api_post("/chargedocuments/Complete", complete_body)
 
     doc_info = complete_resp.get("ChargeDocument", {})
     print(f"[DOC] Upload confirmed: ChargeDocumentID={doc_info.get('ChargeDocumentID')}")
     return doc_info
+
+
+# ============================================================================
+# VERIFICATION — the API accepts bad data silently, so check what it stored
+# ============================================================================
+
+def verify_saved_charge(claim_id: int, charge_id: int, date_api: str, icd_code: str) -> List[str]:
+    """
+    Before submitting: read the charge back and confirm the service dates and
+    diagnosis survived every step. Returns a list of problems (empty = OK).
+    """
+    try:
+        charges = api_get(f"/charges/forclaim/{claim_id}/")
+    except Exception as e:
+        return [f"could not read the charge back from BCBS ({e})"]
+
+    saved = next((c for c in charges or [] if c.get("ChargeID") == charge_id), None)
+    if not saved:
+        return [f"charge {charge_id} not found on claim {claim_id}"]
+
+    problems = []
+    for field in ("ServiceStartDate", "ServiceEndDate"):
+        got = parse_api_date(saved.get(field))
+        if got != date_api:
+            problems.append(f"{field} is {saved.get(field)!r}, expected {date_api}")
+
+    saved_icd = _norm_icd(saved.get("ICD10Code"))
+    if saved_icd in ("", "ECLAIM") or saved_icd != _norm_icd(icd_code):
+        problems.append(f"diagnosis is {saved.get('ICD10Code')!r} / {saved.get('Diagnosis')!r}, "
+                        f"expected {icd_code}")
+    return problems
+
+
+def check_eclaim_text(text: str, date_api: str, icd_code: str, diagnosis_desc: str) -> List[str]:
+    """Check eClaim PDF text for the service date and a real diagnosis. Returns problems."""
+    t = re.sub(r'\s+', ' ', text or "").upper()
+    dt = datetime.strptime(date_api, "%Y%m%d")
+    date_forms = {dt.strftime(f).upper() for f in
+                  ("%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%d", "%d-%b-%Y", "%d-%b-%y",
+                   "%b %d, %Y", "%d %b %Y", "%B %d, %Y", "%d %B %Y")}
+
+    problems = []
+    if not any(f in t for f in date_forms):
+        problems.append(f"Dates of Service does not show {dt:%d/%m/%Y}")
+
+    code = _norm_icd(icd_code)
+    dotted = f"{code[:3]}.{code[3:]}" if len(code) > 3 else code
+    if not any(s and s.upper() in t for s in (code, dotted, diagnosis_desc)):
+        problems.append(f"Diagnosis does not show {dotted} ({diagnosis_desc})")
+    return problems
+
+
+def verify_eclaim_pdf(claim_id: int, date_api: str, icd_code: str, diagnosis_desc: str) -> List[str]:
+    """
+    After submitting: download the eClaim PDF BCBS generated (GET claims/download,
+    the portal's "eClaim ID" link) and check it. Returns problems (empty = OK).
+    """
+    import base64
+    import time
+
+    pdf_bytes = None
+    for attempt in range(4):  # the PDF can lag the submission slightly
+        try:
+            resp = api_get(f"/claims/download/{claim_id}/")
+            content = resp.get("Content") if isinstance(resp, dict) else None
+            if content:
+                pdf_bytes = base64.b64decode(content) if isinstance(content, str) else bytes(content)
+                break
+        except Exception as e:
+            print(f"[VERIFY] eClaim download attempt {attempt + 1} failed: {e}")
+        time.sleep(5)
+    if not pdf_bytes:
+        return ["could not download the eClaim PDF to check it"]
+
+    try:
+        import fitz  # PyMuPDF, installed in the Dockerfile
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+            text = "\n".join(page.get_text() for page in doc)
+    except Exception as e:
+        return [f"could not read the eClaim PDF ({e})"]
+
+    return check_eclaim_text(text, date_api, icd_code, diagnosis_desc)
 
 
 # ============================================================================
@@ -1391,10 +1513,15 @@ def ask_telegram_for_2fa() -> Optional[str]:
 # MAIN CLAIM FILING FLOW
 # ============================================================================
 
-def file_single_claim(claim_data: dict) -> Tuple[bool, str]:
+def file_single_claim(claim_data: dict) -> Tuple[str, str, Optional[str]]:
     """
     File a single claim via the API.
-    Returns (success: bool, message: str).
+
+    Returns (status, message, ref), where status is the new column M value:
+      "Filed"        — submitted, and the eClaim PDF shows the date + diagnosis
+      "Needs Review" — submitted, but the eClaim PDF check failed (never refiled)
+      "Failed"       — not submitted
+      "Pending"      — not started; needs input (row left untouched, safe to rerun)
     """
     patient = claim_data["patient_name"]
     provider = claim_data["provider_name"]
@@ -1410,13 +1537,26 @@ def file_single_claim(claim_data: dict) -> Tuple[bool, str]:
         dep_id, sequence = resolve_patient(patient)
         country_id = resolve_country(claim_data["country"]) if claim_data["country"] else 24
         currency_id = resolve_currency(claim_data["currency"], country_id) if claim_data["currency"] else COUNTRY_CURRENCY.get(country_id, 220)
+        # Validate the two inputs BCBS rejected claims over, before creating
+        # anything at BCBS — so these rows stay Pending and are safe to rerun.
+        try:
+            date_api = format_date_api(claim_data["date_of_service"])
+        except ValueError as e:
+            return ("Pending", f"Not filed (row {claim_data['row_number']}): {e}. Fix column D and file again.", None)
+
         icd_code, diagnosis_desc = resolve_diagnosis(claim_data["diagnosis"], sequence)
+        if icd_code == "ECLAIM":
+            return ("Pending",
+                    f"Not filed (row {claim_data['row_number']}): no diagnosis (column G is {claim_data['diagnosis']!r}). "
+                    "BCBS rejects claims filed as OTHER. Put the CID from the doctor's "
+                    "order in column G as \"code - description\", or tell me the reason "
+                    "for the visit, then file again.", None)
+
         service_desc = resolve_service(
             claim_data["diagnosis"],
             procedure_codes=claim_data.get("procedure_codes", ""),
             bill_type=claim_data.get("bill_type", ""),
         )
-        date_api = format_date_api(claim_data["date_of_service"])
         city = claim_data["city"].upper() if claim_data["city"] else ""
 
         print(f"[CLAIM] Resolved: dep_id={dep_id}, seq={sequence}, country={country_id}, "
@@ -1448,7 +1588,7 @@ def file_single_claim(claim_data: dict) -> Tuple[bool, str]:
         claim_id = step1_resp.get("Claim", {}).get("ClaimSubmissionID")
 
         if not claim_id:
-            return (False, "Failed to create claim — no ClaimSubmissionID returned")
+            return ("Failed", "Failed to create claim — no ClaimSubmissionID returned", None)
 
         print(f"[STEP 1] Claim created: ClaimSubmissionID={claim_id}")
 
@@ -1499,7 +1639,7 @@ def file_single_claim(claim_data: dict) -> Tuple[bool, str]:
         charge_id = step3_resp.get("Charge", {}).get("ChargeID")
 
         if not charge_id:
-            return (False, f"Failed to add charge — no ChargeID returned (claim {claim_id})")
+            return ("Failed", f"Failed to add charge — no ChargeID returned (claim {claim_id})", None)
 
         print(f"[STEP 3] Charge added: ChargeID={charge_id}")
 
@@ -1521,7 +1661,7 @@ def file_single_claim(claim_data: dict) -> Tuple[bool, str]:
             doc_uploaded = False
             try:
                 if download_from_drive(link, tmp_path):
-                    doc_info = upload_document(claim_id, charge_id, tmp_path)
+                    doc_info = upload_document(claim_id, charge_id, tmp_path, step3_body["Charge"])
                     if doc_info and doc_info.get("ChargeDocumentID"):
                         print(f"[STEP 4] Document uploaded: {doc_info.get('ChargeDocumentID')}")
                         doc_uploaded = True
@@ -1534,10 +1674,10 @@ def file_single_claim(claim_data: dict) -> Tuple[bool, str]:
                     os.unlink(tmp_path)
 
             if not doc_uploaded:
-                return (False, f"Document upload failed for claim {claim_id} — claim NOT submitted (receipt is required). Drive link: {link}")
+                return ("Failed", f"Document upload failed for claim {claim_id} — claim NOT submitted (receipt is required). Drive link: {link}", None)
         else:
             # No drive link = no receipt = cannot submit
-            return (False, f"No supporting document link in sheet for claim {claim_id} — claim NOT submitted (receipt is required)")
+            return ("Failed", f"No supporting document link in sheet for claim {claim_id} — claim NOT submitted (receipt is required)", None)
 
         # ── Step 4b: Upload secondary document (if present) ──
         secondary_link = claim_data.get("secondary_doc", "").strip()
@@ -1555,7 +1695,7 @@ def file_single_claim(claim_data: dict) -> Tuple[bool, str]:
 
             try:
                 if download_from_drive(secondary_link, sec_tmp_path):
-                    sec_doc_info = upload_document(claim_id, charge_id, sec_tmp_path)
+                    sec_doc_info = upload_document(claim_id, charge_id, sec_tmp_path, step3_body["Charge"])
                     if sec_doc_info and sec_doc_info.get("ChargeDocumentID"):
                         print(f"[STEP 4b] Secondary document uploaded: {sec_doc_info.get('ChargeDocumentID')}")
                     else:
@@ -1567,6 +1707,17 @@ def file_single_claim(claim_data: dict) -> Tuple[bool, str]:
             finally:
                 if os.path.exists(sec_tmp_path):
                     os.unlink(sec_tmp_path)
+
+        # ── Step 4c: Verify BCBS stored the date + diagnosis (BEFORE submitting) ──
+        # The API returns 200 for data it then drops, so check what it kept.
+        # Stopping here leaves an unsubmitted draft — nothing reaches BCBS.
+        print("\n[STEP 4c] Verifying saved charge before submitting...")
+        problems = verify_saved_charge(claim_id, charge_id, date_api, icd_code)
+        if problems:
+            return ("Failed",
+                    f"NOT submitted — BCBS did not keep the charge as sent: {'; '.join(problems)}. "
+                    f"Draft claim {claim_id} left unsubmitted.", None)
+        print("[STEP 4c] Service dates and diagnosis confirmed on the saved charge")
 
         # ── Step 5: Set payment account ──
         print("\n[STEP 5] Setting payment account...")
@@ -1608,23 +1759,29 @@ def file_single_claim(claim_data: dict) -> Tuple[bool, str]:
         submitted_claim = step6_resp.get("Claim", {})
         submitted_date = submitted_claim.get("SubmittedDate")
 
-        if submitted_date:
-            ref = f"CLM-{claim_id}"
-            print(f"\n[SUCCESS] Claim submitted! ID={claim_id}, Date={submitted_date}")
-            return (True, f"Claim filed successfully! Reference: {ref} (ID: {claim_id}), Submitted: {submitted_date}")
-        else:
-            # Check if submission ID exists at least
-            if submitted_claim.get("ClaimSubmissionID"):
-                ref = f"CLM-{claim_id}"
-                print(f"\n[SUCCESS] Claim submitted (no date in response). ID={claim_id}")
-                return (True, f"Claim filed! Reference: {ref} (ID: {claim_id})")
-            else:
-                return (False, f"Claim submission may have failed — no confirmation in response")
+        if not (submitted_date or submitted_claim.get("ClaimSubmissionID")):
+            return ("Failed", "Claim submission may have failed — no confirmation in response", None)
+
+        ref = f"CLM-{claim_id}"
+        print(f"\n[SUBMITTED] ID={claim_id}, Date={submitted_date}")
+
+        # ── Step 7: Check the eClaim PDF BCBS generated ──
+        # Submitted is not the same as Filed: only mark Filed once the form
+        # BCBS will process shows our service date and a real diagnosis.
+        print("\n[STEP 7] Checking the submitted eClaim PDF...")
+        problems = verify_eclaim_pdf(claim_id, date_api, icd_code, diagnosis_desc)
+        if problems:
+            return ("Needs Review",
+                    f"Submitted as {ref}, but the eClaim PDF check failed: {'; '.join(problems)}. "
+                    "Check it in the BCBS portal — NOT marked Filed.", ref)
+
+        print(f"[SUCCESS] eClaim PDF shows the service date and diagnosis")
+        return ("Filed", f"Claim filed and verified. Reference: {ref} (ID: {claim_id})", ref)
 
     except Exception as e:
         tb = traceback.format_exc()
         print(f"\n[ERROR] Claim filing failed: {e}\n{tb}")
-        return (False, f"Error: {str(e)}")
+        return ("Failed", f"Error: {str(e)}", None)
 
 
 def authenticate() -> bool:
@@ -1711,25 +1868,19 @@ def main():
     # File each claim
     results = []
     for claim in claims:
-        success, message = file_single_claim(claim)
-        results.append((claim, success, message))
-
-        if success:
-            # Extract claim ID from message
-            ref_match = re.search(r'ID:\s*(\d+)', message)
-            ref = ref_match.group(1) if ref_match else "FILED"
-            update_sheets(claim["row_number"], f"CLM-{ref}", "Filed")
-        else:
-            update_sheets(claim["row_number"], "", "Failed")
+        status, message, ref = file_single_claim(claim)
+        results.append((claim, status, message))
+        if status != "Pending":  # Pending = not started; leave the row as-is
+            update_sheets(claim["row_number"], ref or "", status)
 
     # Build summary
-    filed = sum(1 for _, s, _ in results if s)
-    failed = sum(1 for _, s, _ in results if not s)
-
-    summary_lines = [f"Claim filing complete: {filed} filed, {failed} failed"]
-    for claim, success, message in results:
-        emoji = "OK" if success else "FAIL"
-        summary_lines.append(f"  [{emoji}] {claim['patient_name']} / {claim['provider_name']}: {message}")
+    counts = {s: sum(1 for _, st, _ in results if st == s)
+              for s in ("Filed", "Needs Review", "Failed", "Pending")}
+    summary_lines = ["Claim filing complete: " + ", ".join(
+        f"{n} {s.lower()}" for s, n in counts.items() if n)]
+    tags = {"Filed": "OK", "Needs Review": "CHECK", "Failed": "FAIL", "Pending": "NEEDS INFO"}
+    for claim, status, message in results:
+        summary_lines.append(f"  [{tags[status]}] {claim['patient_name']} / {claim['provider_name']}: {message}")
 
     summary = "\n".join(summary_lines)
     print(f"\n[SUMMARY]\n{summary}")

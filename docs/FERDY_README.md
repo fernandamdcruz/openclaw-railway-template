@@ -197,16 +197,16 @@ FerdyBot writes rows to this sheet when processing medical invoices. When filing
 | A | Date Processed | (metadata only) | When FerdyBot processed the invoice |
 | B | Patient Name | Step 2: Patient dropdown | Must match exactly the BCBS enrolled dependent name |
 | C | Provider Name | Step 4: Select Provider | Search autocomplete — use exact name to find match |
-| D | Date of Service | Step 4: Start Date + End Date | Use same date for both if single-day visit |
+| D | Date of Service | Step 4: Start Date + End Date | Date on the provider's bill/receipt (Fleury: ficha date on the Recibo). `YYYY-MM-DD` only — the script refuses anything else |
 | E | Amount Billed | Step 4: Charge Amount | Exact value, no rounding |
 | F | Currency | Step 4: Billed Invoice Currency | BRL = Brazilian Real, EUR = Euro, USD = US Dollar |
-| G | Diagnosis Codes | Step 4: Condition or Diagnosis | CID/ICD codes — search in BCBS dropdown; use OTHER if not found |
+| G | Diagnosis Codes | Step 4: Condition or Diagnosis | `code - description` (e.g. `Z01.4 - Routine gynecological examination`). CID from the bill, else the doctor's order, else Fernanda's stated reason. **Never OTHER** — BCBS rejects it; the script refuses to file |
 | H | Procedure Codes | Step 4: Service Description | Map to closest BCBS dropdown option; use OTHER if not found |
 | I | Invoice # | Step 4: Charge Nickname | Use as the charge nickname (e.g. "INV-5202") |
 | J | Year | (metadata only) | Year of service — for reference only |
 | K | City | Step 4: City | City where treatment occurred |
 | L | Country | Step 4: Country of Treatment | Country where treatment occurred |
-| M | Claim Status | (filter + update) | Only process rows where status = "Pending"; update to "Filed" after submission |
+| M | Claim Status | (filter + update) | Only `Pending` rows are filed. Script writes `Filed` (submitted + eClaim PDF verified), `Needs Review` (submitted, PDF check failed — never refile), or `Failed` (not submitted) |
 | N | Drive File Link | Step 4: Supporting Document | **Use the original invoice file already in the Telegram chat — no Drive download needed** |
 | O | Bill Type | (metadata only) | "Medical", "Dental", etc. — for reference only |
 | P | Secondary Doc | (optional) | Secondary supporting document if applicable |
@@ -361,6 +361,14 @@ The `commitSha` parameter is optional but recommended — without it, Railway de
 ---
 
 ## Incident Log
+
+### 2026-10-02: Every eClaim since March had blank "Dates of Service"
+- **What happened**: Three Fleury claims (CLM-1160358, -1160359, -1156028) reached BCBS with "Dates of Service" blank and Diagnosis "OTHER". BCBS filled in dates themselves, wrongly (doctor's-order date, processing date), and rejected for missing diagnosis. Fixed by hand on 2026-10-02.
+- **Root cause (dates)**: The claims API **writes** dates as `YYYYMMDD` but **reads them back** as `DD-MON-YY` (`27-AUG-26`). `chargedocuments/Complete` re-saves the whole Charge from its request body. The script built that body from the `charges/forclaim` GET echo, posting `27-AUG-26` back — which the API silently nulls. Dates saved correctly in Step 3 were wiped in Step 4. Because document upload is mandatory, this hit **every** claim since 2026-03-27. Found by reading the portal's Flutter bundle (`main.dart.js`): it converts dates back (`dKl(aLR(pR(x)))`) before calling Complete.
+- **Root cause (diagnosis)**: column G was `"Not specified on bill"` → resolved to `ECLAIM`/`OTHER`. Separately, the keyword fallback matched substrings, so any "routine …" text resolved to URINARY TRACT INFECTION (`uti` ⊂ `routine`).
+- **Fix (api-v10)**: Complete now sends the Charge as saved (write format). Before submitting, the script reads the charge back and aborts if the date or CID didn't stick. After submitting, it downloads the eClaim PDF (`GET claims/download/{id}/`) and only marks `Filed` if it shows the date and diagnosis — otherwise `Needs Review`. Column D must be `YYYY-MM-DD`; claims with no diagnosis are refused (row stays Pending) instead of filed as OTHER.
+- **Lesson**: This API returns 200 for data it then drops. Never trust a write — read it back. And never post a GET response back to a write endpoint: the formats differ.
+
 
 ### 2026-03-27: BCBS API claim filing — first successful end-to-end
 - **What happened**: After days of failed Playwright-based browser automation attempts, switched to direct REST API calls (`claimsapire.hthworldwide.com/v4`). Tested locally via Railway CLI with a manually provided BCBS token. Discovered and fixed multiple issues: wrong API body structures (wrapper keys like `OtherInsuranceDetail` vs `Insurance`, `PaymentAccountDetail` vs `PaymentAccount`), missing env var defaults, Telegram bot token not found, 2FA code reuse.

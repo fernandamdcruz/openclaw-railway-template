@@ -52,6 +52,21 @@ The script handles 2FA by writing a signal file and waiting for the code via a f
 - Do this as fast as possible — the script has a 5-minute timeout.
 - Do NOT ask Fernanda for the code yourself — the script already asked her via Telegram.
 
+## Reading The Result
+
+Each claim ends with one tag. Relay every line to Fernanda as written.
+
+- **[OK]** — filed, and the eClaim PDF shows the service date and diagnosis. Column M = Filed.
+- **[CHECK]** — submitted to BCBS, but the eClaim PDF check failed. Column M = Needs Review. **NEVER file it again** — it is already at BCBS and refiling makes a duplicate. Tell Fernanda what failed.
+- **[FAIL]** — not submitted. Report the error and stop.
+- **[NEEDS INFO]** — not started; the row is unchanged and still Pending.
+  - *No diagnosis*: ask Fernanda for the CID from the doctor's order, or the reason for the visit (e.g. "routine annual preventive check-up"). Write her answer into column G of that row (row number is in the message), as `code - description` if she gave a CID, then run the script again:
+    ```bash
+    XDG_CONFIG_HOME=/data/workspace/.config GOG_KEYRING_PASSWORD="$GOG_KEYRING_PASSWORD" gog sheets update 1wU7iuAH7mZdenIKNAyrUFuJkVjZsYjxeL07NzqUwMYk "'<YEAR>'!G<ROW>" "<HER ANSWER>"
+    ```
+    `<YEAR>` is the current year's tab (e.g. `2026`).
+  - *Bad date*: column D must be `YYYY-MM-DD`. Tell Fernanda; do not guess the date.
+
 ## If The Script Fails
 
 1. **IMMEDIATELY message Fernanda** with the FULL error output.

@@ -43,7 +43,7 @@ XDG_CONFIG_HOME=/data/workspace/.config GOG_KEYRING_PASSWORD="$GOG_KEYRING_PASSW
 
 ## MEDICAL RECEIPT PROCESSING
 
-**Workflow:** When Fernanda sends a medical/dental bill image or PDF via Telegram, process automatically without asking for confirmation.
+**Workflow:** When Fernanda sends a medical/dental bill image or PDF via Telegram, process automatically without asking for confirmation — except when no document has a diagnosis (see STEP 1).
 
 **Environment Variables:**
 ```
@@ -54,6 +54,18 @@ GOG_KEYRING_PASSWORD="$GOG_KEYRING_PASSWORD"
 ### STEP 1 - READ THE RECEIPT
 
 Use vision to extract: Patient Name, Provider Name, Date of Service (YYYY-MM-DD), Amount Billed, Currency (default BRL), Diagnosis Codes, Procedure Code, Invoice #, Year, City (where treatment occurred), Country (where treatment occurred), Notes, Bill Type: "Dental" or "Medical"
+
+**Date of Service (column D) — BCBS pays on this date, get it exactly right:**
+* It is the date on the PROVIDER'S BILL/RECEIPT for the service.
+* Fleury: the ficha date on the Recibo de Pagamento — "CONSTANTES NA FICHA Nº ... DE dd/mm/aaaa".
+* NEVER use the date on the doctor's order (pedido médico), and NEVER the date you processed the bill.
+* Brazilian dates are DAY first: 05/08/2026 is 5 August. Write column D as YYYY-MM-DD (2026-08-05). The filing script refuses any other format.
+
+**Diagnosis (column G) — BCBS rejects claims with no diagnosis:**
+* Format: `code - description` in English, e.g. `Z01.4 - Routine gynecological examination`.
+* If the bill has no CID, read it from the doctor's order / secondary document (it is usually there).
+* If NO document has a CID: ASK Fernanda for the reason for the visit (e.g. "routine annual preventive check-up") and write her answer in column G. This is the one exception to "process without asking for confirmation".
+* NEVER write "Not specified on bill" or leave column G blank — the claim cannot be filed that way.
 
 ### STEP 2 - UPLOAD TO GOOGLE DRIVE
 
