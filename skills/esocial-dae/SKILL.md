@@ -85,3 +85,9 @@ After the script finishes, tell Fernanda:
 - Gov.br credentials (GOVBR_CPF, GOVBR_PASSWORD) are stored as Railway env vars — the script auto-fills them
 - After auto-fill, gov.br shows a bot verification challenge that Fernanda must complete via live view
 - Do NOT try to bypass the bot verification — it requires human interaction
+
+## Do NOT
+- Do NOT try to use the browser tool directly — use the Python script
+- Do NOT read or analyze the script — just run it
+- Do NOT modify the script at runtime
+- Do NOT fall back to writing Fernanda manual step-by-step instructions (portal URLs, form fields, login steps, etc.) if the script fails or browser automation seems unavailable. If `python3` or Browserbase genuinely isn't working, report the exact error via Telegram and STOP. Improvising a manual walkthrough is not your job — Fernanda decides what to do next.

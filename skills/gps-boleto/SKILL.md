@@ -73,6 +73,7 @@ python3 /data/workspace/skills/gps-boleto/gps_boleto.py --person fernanda
 - Do NOT try to use the browser tool directly — use the Python script
 - Do NOT read or analyze the script — just run it
 - Do NOT modify the script at runtime
+- Do NOT fall back to writing Fernanda manual step-by-step instructions (portal URLs, form fields, CAPTCHA pages, etc.) if the script fails or browser automation seems unavailable. If `python3` or Browserbase genuinely isn't working, report the exact error via Telegram and STOP. Improvising a manual walkthrough is not your job — Fernanda decides what to do next.
 
 ## Data Reference
 
