@@ -1,6 +1,6 @@
 # FerdyBot — Personal AI Assistant for Fernanda
 
-Telegram-based assistant that handles Fernanda's administrative chores: filing medical insurance claims, generating Brazilian tax/social-security boletos, and processing receipts.
+Telegram-based assistant that handles Fernanda's administrative chores: filing medical insurance claims and processing receipts.
 
 Built on **OpenClaw** (an agent framework) deployed on **Railway**. Talks to Telegram, runs Python skills, drives browsers when needed.
 
@@ -11,10 +11,10 @@ Built on **OpenClaw** (an agent framework) deployed on **Railway**. Talks to Tel
 | Skill | What it does | When it runs |
 |-------|--------------|--------------|
 | `file-claim` | Files BCBS/GeoBlue insurance reimbursement claims via the BCBS REST API. Reads pending claims from Google Sheets, handles 2FA via Telegram, updates Sheets with claim refs. | On demand: "file claim" in Telegram |
-| `gps-boleto` | Generates monthly GPS (social-security) boletos for Fernanda and Max via the SAL portal. Uses Browserbase cloud browser for CAPTCHA solving. | Monthly cron (5th of month) or on demand: "GPS boleto" |
-| `esocial-dae` | Generates monthly eSocial DAE (domestic-worker tax) slips via gov.br. Uses Browserbase for human gov.br login. | Monthly cron or on demand: "eSocial DAE" |
 | Receipt processing | When Fernanda sends a bill image via Telegram: extracts data via vision, uploads to Drive, appends a row to the "Medical Bills" Google Sheet. | Automatic on image receipt (see `TOOLS.md`) |
 | Calendar invites | Creates Google Calendar events via the `gog` CLI. | On demand: "create an event…" |
+
+> GPS boleto and eSocial DAE generation used to live here but have moved to a separate agent — removed from FerdyBot to avoid duplicate automation.
 
 ---
 
@@ -39,7 +39,7 @@ Telegram → OpenClaw Gateway (Railway) → Claude Sonnet 4.5 → Python skills
 
 ## 📍 Where to make common edits
 
-### Change a skill's behavior (BCBS claim, GPS, eSocial)
+### Change a skill's behavior (BCBS claim)
 
 Each skill lives in `skills/<name>/`:
 
@@ -100,8 +100,6 @@ railway redeploy
 | `OPENCLAW_WORKSPACE_DIR` | `/data/workspace` (skills + memory) |
 | `OPENCLAW_GATEWAY_TOKEN` | Auto-generated if unset; auto-injected into proxied requests |
 | `BCBS_USERNAME` / `BCBS_PASSWORD` | BCBS portal login (used by `claim_filer_api.py`) |
-| `BROWSERBASE_API_KEY` | Cloud browser for gov.br + SAL skills |
-| `GOVBR_CPF` / `GOVBR_PASSWORD` | Pre-fill credentials for gov.br auth |
 | `GOG_KEYRING_PASSWORD` | Encrypts `gog` CLI's Google OAuth tokens on disk |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Notifications from Python scripts |
 
@@ -117,9 +115,7 @@ openclaw-railway-template/
 │   ├── ADR-001-claim-filing-architecture.md
 │   └── browser-diagnosis.md
 ├── skills/
-│   ├── file-claim/          ← BCBS claim filing
-│   ├── gps-boleto/          ← Monthly GPS boleto generation
-│   └── esocial-dae/         ← Monthly eSocial DAE generation
+│   └── file-claim/          ← BCBS claim filing
 ├── src/
 │   ├── server.js            ← Express wrapper (proxy, gateway lifecycle, setup wizard)
 │   └── public/              ← Setup wizard frontend
