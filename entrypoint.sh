@@ -87,6 +87,16 @@ if [ ! -d /data/.linuxbrew ]; then
  SKILLS_DEST="/data/workspace/skills"
  mkdir -p "$SKILLS_DEST"
  cp -a /app/skills/* "$SKILLS_DEST/" 2>/dev/null || true
+ # Remove skill dirs that exist on the volume but no longer ship in the
+ # image (e.g. a skill was deleted from the repo) — cp alone never
+ # deletes stale copies, so a removed skill would otherwise keep running.
+ for dir in "$SKILLS_DEST"/*/; do
+ name=$(basename "$dir")
+ if [ ! -d "/app/skills/$name" ]; then
+ echo "[entrypoint] Removing stale skill: $name"
+ rm -rf "$dir"
+ fi
+ done
  chown -R openclaw:openclaw "$SKILLS_DEST" 2>/dev/null || true
  echo "[entrypoint] Skills deployed to $SKILLS_DEST"
  fi
